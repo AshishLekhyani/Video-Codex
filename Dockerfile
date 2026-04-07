@@ -1,5 +1,5 @@
 # Stage 1: Build the Rust Engine
-FROM rust:1.80-slim-bullseye AS rust-builder
+FROM rust:slim-bullseye AS rust-builder
 WORKDIR /app
 # We create a dummy project to cache dependencies if needed, but for simplicity we'll just build.
 COPY video-codec ./video-codec
