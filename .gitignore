@@ -39,3 +39,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Rust
+video-codec/target
+video-codec/target_web
+video-codec/Cargo.lock
+
+# Studio Temp Storage
+/temp
+push_error.txt
+
