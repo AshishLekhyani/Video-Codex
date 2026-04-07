@@ -1,0 +1,6 @@
+node_modules
+.next
+temp
+video-codec/target
+video-codec/target_web
+.git
