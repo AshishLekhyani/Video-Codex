@@ -48,6 +48,51 @@ body {
   transition: background-color 0.5s ease, color 0.5s ease;
 }
 
+/* Layout: Force side-by-side at desktop, stacked on mobile */
+.studio-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.studio-sidebar {
+  order: 2;
+  width: 100%;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+.studio-main {
+  order: 1;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+@media (min-width: 1024px) {
+  .studio-layout {
+    flex-direction: row;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .studio-sidebar {
+    order: 1;
+    width: 320px;
+    flex-shrink: 0;
+    border-top: none;
+    border-right: 1px solid rgba(255,255,255,0.1);
+    height: 100%;
+  }
+  .studio-main {
+    order: 2;
+    height: 100%;
+    overflow-y: hidden;
+  }
+}
+
+
 /* Studio Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

@@ -213,11 +213,11 @@ export default function VideoConverter() {
   );
 
   return (
-    <div className="flex flex-col lg:flex-row min-h-screen lg:h-screen bg-background text-foreground font-sans selection:bg-accent-primary/30 overflow-hidden">
+    <div className="studio-layout bg-background text-foreground font-sans selection:bg-accent-primary/30">
       <div className="noise" />
 
       {/* --- SIDEBAR (Options & Metadata) --- */}
-      <aside className="order-2 lg:order-1 w-full lg:w-80 h-auto lg:h-full shrink-0 border-t lg:border-t-0 lg:border-r border-foreground/10 bg-surface/40 backdrop-blur-3xl flex flex-col z-30">
+      <aside className="studio-sidebar bg-surface/40 backdrop-blur-3xl flex flex-col z-30">
         <div className="p-8 border-b border-foreground/10 bg-gradient-to-br from-white/[0.02] to-transparent">
           <div className="flex items-center gap-4 mb-8">
             <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-accent-primary to-accent-secondary p-[1px] shadow-glow">
@@ -340,7 +340,7 @@ export default function VideoConverter() {
       </aside>
 
       {/* --- MAIN STAGE --- */}
-      <main className="order-1 lg:order-2 flex-1 w-full h-auto lg:h-full flex flex-col relative z-20 overflow-y-auto lg:overflow-hidden min-w-0">
+      <main className="studio-main relative z-20">
         
         {/* Workspace Toolbar */}
         <header className="h-16 md:h-20 border-b border-foreground/5 flex items-center justify-between px-4 md:px-10 bg-background/50 backdrop-blur-md sticky top-0 z-40">
@@ -456,34 +456,34 @@ export default function VideoConverter() {
                           </div>
                        </div>
                      ) : (
-                      <div className="space-y-6 md:space-y-10">
-                        {/* Encryption Key Injected in flow */}
-                        <div className="p-6 md:p-8 rounded-[32px] md:rounded-[40px] border border-foreground/10 bg-surface/5 flex flex-col sm:flex-row items-center gap-4 sm:gap-6 shadow-xl">
-                          <div className="flex items-center justify-center w-12 h-12 md:w-16 md:h-16 rounded-[20px] md:rounded-[24px] bg-foreground/5 border border-foreground/10 shrink-0 text-accent-primary">
-                             <Shield className="w-5 h-5 md:w-6 md:h-6" />
-                          </div>
-                          <div className="flex-1 w-full min-w-0">
-                             <p className="text-[10px] md:text-xs font-black text-foreground/60 uppercase tracking-widest mb-2 px-1">Crypto Vault (Optional)</p>
-                             <div className="relative">
-                               <input
-                                 type={showPassword ? "text" : "password"}
-                                 value={password}
-                                 onChange={e => setPassword(e.target.value)}
-                                 placeholder="Enter master decryption key..."
-                                 className="w-full bg-foreground/5 border border-foreground/10 rounded-2xl py-4 md:py-5 pl-6 pr-14 text-xs md:text-sm text-foreground focus:outline-none focus:border-accent-primary/40 focus:ring-1 focus:ring-accent-primary/40 font-mono transition-all"
-                               />
-                               <button 
-                                 onClick={() => setShowPassword(!showPassword)}
-                                 className="absolute right-4 top-1/2 -translate-y-1/2 p-2 hover:bg-foreground/10 rounded-xl text-foreground/40 transition-colors"
-                               >
-                                 {showPassword ? <EyeOff className="w-4 h-4 md:w-5 md:h-5" /> : <Eye className="w-4 h-4 md:w-5 md:h-5" />}
-                               </button>
-                             </div>
+                      <div className="space-y-5">
+                        {/* Crypto Vault — inline shield icon inside input */}
+                        <div>
+                          <label className="text-[10px] font-black text-foreground/40 uppercase tracking-[0.3em] mb-3 block">
+                            Crypto Vault (Optional)
+                          </label>
+                          <div className="relative flex items-center">
+                            <div className="absolute left-4 z-10 flex items-center justify-center w-9 h-9 rounded-xl bg-accent-primary/10 border border-accent-primary/20 text-accent-primary pointer-events-none">
+                              <Shield className="w-4 h-4" />
+                            </div>
+                            <input
+                              type={showPassword ? "text" : "password"}
+                              value={password}
+                              onChange={e => setPassword(e.target.value)}
+                              placeholder="Enter master decryption key..."
+                              className="w-full bg-foreground/5 border border-foreground/10 rounded-2xl py-4 pl-[60px] pr-14 text-sm text-foreground focus:outline-none focus:border-accent-primary/40 focus:ring-1 focus:ring-accent-primary/40 font-mono transition-all placeholder:text-foreground/25"
+                            />
+                            <button
+                              onClick={() => setShowPassword(!showPassword)}
+                              className="absolute right-4 top-1/2 -translate-y-1/2 p-2 hover:bg-foreground/10 rounded-xl text-foreground/40 hover:text-foreground transition-colors"
+                            >
+                              {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
                           </div>
                         </div>
 
-                        {/* Execute Codec for Desktop is placed here inside main flow */}
-                        <div className="hidden lg:block">
+                        {/* Execute Codec for Desktop */}
+                        <div className="hidden lg:block pt-2">
                            {ExecuteAction}
                         </div>
                       </div>
