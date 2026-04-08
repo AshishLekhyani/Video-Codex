@@ -57,7 +57,6 @@ export default function VideoConverter() {
   const [showPassword, setShowPassword] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [isLightMode, setIsLightMode] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Sync theme to body
@@ -194,12 +193,31 @@ export default function VideoConverter() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // The main action button extracted to allow responsive repositioning at the very end of the scroll on mobile
+  const ExecuteAction = (
+    <button
+      onClick={handleConvert}
+      className="w-full p-6 md:p-10 bg-accent-primary rounded-[32px] md:rounded-[48px] text-background flex flex-row items-center justify-between gap-4 transition-all hover:scale-[1.01] active:shadow-inner shadow-glow group"
+    >
+      <div className="flex items-center gap-4 md:gap-8 min-w-0">
+        <Zap className="w-8 h-8 md:w-10 md:h-10 animate-pulse shrink-0" />
+        <div className="text-left min-w-0">
+            <p className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.4em] leading-none mb-2 truncate group-hover:text-background/80 transition-colors">Initialize Operation</p>
+            <p className="text-xl md:text-4xl font-black tracking-tighter uppercase leading-none truncate">Execute Codec</p>
+        </div>
+      </div>
+      <div className="w-12 h-12 md:w-24 md:h-24 rounded-full bg-background/20 border border-white/20 flex items-center justify-center shrink-0 group-hover:bg-background/30 transition-colors">
+        <ChevronRight className="w-6 h-6 md:w-10 md:h-10 group-hover:translate-x-1 transition-transform" />
+      </div>
+    </button>
+  );
+
   return (
-    <div className="flex h-screen bg-background text-foreground overflow-hidden font-sans selection:bg-accent-primary/30">
+    <div className="flex flex-col lg:flex-row min-h-screen lg:h-screen bg-background text-foreground font-sans selection:bg-accent-primary/30 overflow-hidden">
       <div className="noise" />
 
-      {/* --- SIDEBAR --- */}
-      <aside className="w-80 border-r border-foreground/10 bg-surface/40 backdrop-blur-3xl flex flex-col z-30">
+      {/* --- SIDEBAR (Options & Metadata) --- */}
+      <aside className="order-2 lg:order-1 w-full lg:w-80 h-auto lg:h-full shrink-0 border-t lg:border-t-0 lg:border-r border-foreground/10 bg-surface/40 backdrop-blur-3xl flex flex-col z-30">
         <div className="p-8 border-b border-foreground/10 bg-gradient-to-br from-white/[0.02] to-transparent">
           <div className="flex items-center gap-4 mb-8">
             <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-accent-primary to-accent-secondary p-[1px] shadow-glow">
@@ -311,110 +329,42 @@ export default function VideoConverter() {
               </div>
             ))}
           </div>
+
+          {/* Place Mobile Execute Action at the very end of the scroll */}
+          {file && !isProcessing && (
+            <div className="block lg:hidden mt-8 pt-8 border-t border-foreground/10">
+               {ExecuteAction}
+            </div>
+          )}
         </div>
       </aside>
 
       {/* --- MAIN STAGE --- */}
-      <main className="flex-1 flex flex-col relative z-20 overflow-hidden">
+      <main className="order-1 lg:order-2 flex-1 w-full h-auto lg:h-full flex flex-col relative z-20 overflow-y-auto lg:overflow-hidden min-w-0">
         
         {/* Workspace Toolbar */}
-        <header className="h-20 border-b border-foreground/5 flex items-center justify-between px-10 bg-background/50 backdrop-blur-md sticky top-0 z-40">
-           <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-foreground/5 border border-foreground/10">
-                <span className="text-[10px] font-black text-foreground/70 uppercase tracking-widest leading-none">Workspace: Primary</span>
+        <header className="h-16 md:h-20 border-b border-foreground/5 flex items-center justify-between px-4 md:px-10 bg-background/50 backdrop-blur-md sticky top-0 z-40">
+           <div className="flex items-center gap-3 md:gap-4 shrink-0">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-foreground/5 border border-foreground/10">
+                <span className="text-[10px] md:text-xs font-black text-foreground uppercase tracking-widest leading-none">
+                  WORKSPACE: PRIMARY
+                </span>
               </div>
            </div>
            
-           <div className="flex items-center gap-4">
-              {/* Security Key in Header (V4 Optimization) */}
-              <div className="relative w-56 hidden md:block group">
-                <div className="absolute inset-y-0 left-3.5 flex items-center pointer-events-none transition-colors group-focus-within:text-accent-primary">
-                  {password ? <Lock className="w-3.5 h-3.5" /> : <Shield className="w-3.5 h-3.5 opacity-50" />}
-                </div>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  placeholder="Studio Encryption Key..."
-                  className="w-full bg-foreground/5 border border-foreground/10 rounded-2xl py-2.5 pl-10 pr-10 text-[10px] text-foreground focus:outline-none focus:border-accent-primary/20 focus:bg-foreground/10 transition-all font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-foreground/40 hover:text-accent-primary transition-colors focus:outline-none"
+           <div className="flex items-center gap-2 md:gap-4 flex-1 justify-end min-w-0">
+              <div className="flex items-center bg-foreground/5 border border-foreground/10 rounded-[20px] md:rounded-2xl p-1 shrink-0">
+                <button 
+                  onClick={() => setIsLightMode(!isLightMode)}
+                  className="w-10 h-10 md:w-10 md:h-10 flex items-center justify-center rounded-xl text-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-all"
                 >
-                  {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  {isLightMode ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
                 </button>
               </div>
-
-              <div className="w-px h-6 bg-foreground/10 mx-1" />
-
-              <button 
-                onClick={() => setIsLightMode(!isLightMode)}
-                className="w-10 h-10 flex items-center justify-center rounded-2xl text-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-all"
-                title="Phase Shift (Theme Toggle)"
-              >
-                {isLightMode ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-              </button>
-              
-              <button 
-                onClick={() => setShowSettings(true)}
-                className="h-10 px-5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-all border border-transparent hover:border-foreground/10"
-              >
-                Studio Settings
-              </button>
            </div>
         </header>
 
-        <AnimatePresence>
-          {showSettings && (
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-xl"
-            >
-              <motion.div 
-                initial={{ y: 20, scale: 0.95 }}
-                animate={{ y: 0, scale: 1 }}
-                exit={{ y: 20, scale: 0.95 }}
-                className="w-full max-w-md bg-surface border border-foreground/10 shadow-2xl rounded-[32px] overflow-hidden p-8 relative"
-              >
-                <button onClick={() => setShowSettings(false)} className="absolute top-6 right-6 text-foreground/40 hover:text-foreground">
-                  <X className="w-5 h-5" />
-                </button>
-                <h3 className="text-xl font-black mb-8 tracking-tighter text-foreground">Studio Defaults</h3>
-                
-                <div className="space-y-8">
-                  <div className="space-y-3">
-                     <label className="text-[10px] font-black text-foreground/50 uppercase tracking-[0.2em]">Compute Threads</label>
-                     <select className="w-full bg-background/40 border border-foreground/10 rounded-2xl py-3.5 px-5 text-xs font-bold appearance-none text-foreground focus:outline-none focus:border-accent-primary/20">
-                       <option>Auto (Hardware Limit)</option>
-                       <option>2 Threads</option>
-                       <option>4 Threads</option>
-                       <option>Max Parallel</option>
-                     </select>
-                  </div>
-                  
-                  <div className="space-y-3">
-                     <label className="text-[10px] font-black text-foreground/50 uppercase tracking-[0.2em]">Hardware Target</label>
-                     <select className="w-full bg-background/40 border border-foreground/10 rounded-2xl py-3.5 px-5 text-xs font-bold appearance-none text-foreground focus:outline-none focus:border-accent-primary/20">
-                       <option>Balanced CPU</option>
-                       <option>NVIDIA NVENC</option>
-                       <option>Apple Metal (M-Series)</option>
-                     </select>
-                  </div>
-                  
-                  <button onClick={() => setShowSettings(false)} className="w-full py-4 bg-accent-primary text-background font-black uppercase text-[10px] tracking-widest rounded-2xl shadow-glow transition-transform hover:scale-[1.02] active:scale-95">
-                    Update Registry
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        <div className="flex-1 overflow-y-auto p-12 scrollbar-hide">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 lg:p-12 scrollbar-hide py-12 md:py-8">
           <AnimatePresence mode="wait">
             {!file ? (
               <motion.div
@@ -422,7 +372,7 @@ export default function VideoConverter() {
                 initial={{ opacity: 0, scale: 0.98 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 1.02 }}
-                className="h-full flex flex-col items-center justify-center"
+                className="h-full min-h-[400px] flex flex-col items-center justify-center"
               >
                 <div 
                   onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
@@ -430,21 +380,19 @@ export default function VideoConverter() {
                   onDrop={e => { e.preventDefault(); setIsDragging(false); if(e.dataTransfer.files[0]) validateAndSetFile(e.dataTransfer.files[0]); }}
                   onClick={() => fileInputRef.current?.click()}
                   className={cn(
-                    "w-full max-w-3xl aspect-video rounded-[64px] border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all duration-700 relative group overflow-hidden bg-surface/20",
+                    "w-full max-w-3xl aspect-video rounded-[40px] md:rounded-[64px] border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all duration-700 relative group overflow-hidden bg-surface/20",
                     isDragging ? "border-accent-primary bg-accent-primary/5 scale-[1.01]" : "border-foreground/10 hover:border-foreground/20"
                   )}
                 >
                   <input ref={fileInputRef} type="file" accept={mode === 'encode' ? 'video/*' : undefined} className="hidden" onChange={e => { if(e.target.files?.[0]) validateAndSetFile(e.target.files[0]); }} />
                   
-                  <motion.div animate={isDragging ? { y: -10 } : { y: 0 }} className="text-center z-10">
-                    <div className="w-32 h-32 rounded-[40px] bg-foreground/[0.02] border border-foreground/10 flex items-center justify-center mb-10 mx-auto shadow-[0_0_40px_-15px_var(--glow-primary)] transition-all duration-500 group-hover:scale-105 group-hover:border-foreground/20">
-                      {mode === 'encode' ? <FileVideo className="w-12 h-12 text-accent-primary" /> : <Code className="w-12 h-12 text-accent-secondary" />}
+                  <motion.div animate={isDragging ? { y: -10 } : { y: 0 }} className="text-center z-10 p-6">
+                    <div className="w-20 h-20 md:w-32 md:h-32 rounded-[24px] md:rounded-[40px] bg-foreground/[0.02] border border-foreground/10 flex items-center justify-center mb-6 md:mb-10 mx-auto transition-all duration-500 group-hover:scale-105 group-hover:border-foreground/20">
+                      {mode === 'encode' ? <FileVideo className="w-8 h-8 md:w-12 md:h-12 text-accent-primary" /> : <Code className="w-8 h-8 md:w-12 md:h-12 text-accent-secondary" />}
                     </div>
-                    <h2 className="text-4xl font-black tracking-tighter text-foreground mb-4">Load Engine Payload</h2>
-                    <p className="text-foreground/60 font-semibold text-sm tracking-tight">Stream source video or VCEO bitstreams directly</p>
+                    <h2 className="text-2xl md:text-4xl font-black tracking-tighter text-foreground mb-4 leading-none">Load Payload</h2>
+                    <p className="text-foreground/60 font-semibold text-xs md:text-sm tracking-tight">Source Video or VCEO Stream</p>
                   </motion.div>
-                  
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,var(--glow-primary)_0%,transparent_100%)] opacity-0 group-hover:opacity-[0.05] transition-opacity duration-1000" />
                 </div>
               </motion.div>
             ) : (
@@ -452,21 +400,21 @@ export default function VideoConverter() {
                 key="active"
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="max-w-4xl mx-auto w-full space-y-12 pb-32"
+                className="max-w-4xl mx-auto w-full space-y-6 md:space-y-12 pb-32"
               >
-                <div className="p-10 bg-surface/40 backdrop-blur-3xl rounded-[48px] border border-foreground/10 flex items-center justify-between shadow-2xl">
-                  <div className="flex items-center gap-8">
-                    <div className="w-20 h-20 rounded-[32px] bg-foreground/5 border border-foreground/10 flex items-center justify-center text-accent-primary shadow-glow">
-                      {mode === 'encode' ? <FileVideo className="w-10 h-10" /> : <Code className="w-10 h-10 text-accent-secondary" />}
+                <div className="p-6 md:p-10 bg-surface/40 backdrop-blur-3xl rounded-[32px] md:rounded-[48px] border border-foreground/10 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-2xl overflow-hidden">
+                  <div className="flex items-center gap-4 md:gap-8 w-full min-w-0">
+                    <div className="w-14 h-14 md:w-20 md:h-20 rounded-[24px] md:rounded-[32px] bg-foreground/5 border border-foreground/10 flex items-center justify-center text-accent-primary shrink-0">
+                      {mode === 'encode' ? <FileVideo className="w-7 h-7 md:w-10 md:h-10" /> : <Code className="w-7 h-7 md:w-10 md:h-10 text-accent-secondary" />}
                     </div>
-                    <div>
-                      <h3 className="text-3xl font-black text-foreground tracking-tighter leading-none">{file.name}</h3>
-                      <p className="text-[10px] font-black text-foreground/40 uppercase tracking-[0.3em] mt-3 leading-none">Payload: {(file.size / 1024 / 1024).toFixed(2)} MB • VERIFIED</p>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-lg md:text-3xl font-black text-foreground tracking-tighter leading-tight md:leading-none truncate" title={file.name}>{file.name}</h3>
+                      <p className="text-[9px] md:text-[10px] font-black text-foreground/40 uppercase tracking-[0.2em] mt-2 md:mt-3 leading-none truncate">{(file.size / 1024 / 1024).toFixed(2)} MB • VERIFIED</p>
                     </div>
                   </div>
                   <button 
                     onClick={() => { setFile(null); setEncodedData(null); setError(''); setLogs([]); }}
-                    className="h-16 px-10 rounded-[24px] text-[10px] font-black uppercase tracking-[0.2em] text-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-all border border-transparent hover:border-foreground/10"
+                    className="shrink-0 w-full md:w-auto h-12 md:h-16 px-6 md:px-10 rounded-2xl md:rounded-[24px] text-[10px] font-black uppercase tracking-widest text-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-all border border-foreground/10 md:border-transparent bg-foreground/5 md:bg-transparent"
                   >
                     Detach Source
                   </button>
@@ -508,21 +456,37 @@ export default function VideoConverter() {
                           </div>
                        </div>
                      ) : (
-                       <button
-                         onClick={handleConvert}
-                         className="w-full p-10 bg-accent-primary rounded-[48px] text-background flex items-center justify-between group transition-all hover:scale-[1.01] active:shadow-inner shadow-glow"
-                       >
-                         <div className="flex items-center gap-8 pl-6">
-                            <Zap className="w-10 h-10 animate-pulse" />
-                            <div className="text-left">
-                               <p className="text-[10px] font-black uppercase tracking-[0.4em] leading-none mb-2">Initialize Operation</p>
-                               <p className="text-4xl font-black tracking-tighter uppercase leading-none">Execute Studio Codec</p>
-                            </div>
-                         </div>
-                         <div className="w-24 h-24 rounded-full bg-background/20 border border-white/20 flex items-center justify-center mr-2 group-hover:bg-background/30 transition-colors">
-                           <ChevronRight className="w-10 h-10" />
-                         </div>
-                       </button>
+                      <div className="space-y-6 md:space-y-10">
+                        {/* Encryption Key Injected in flow */}
+                        <div className="p-6 md:p-8 rounded-[32px] md:rounded-[40px] border border-foreground/10 bg-surface/5 flex flex-col sm:flex-row items-center gap-4 sm:gap-6 shadow-xl">
+                          <div className="flex items-center justify-center w-12 h-12 md:w-16 md:h-16 rounded-[20px] md:rounded-[24px] bg-foreground/5 border border-foreground/10 shrink-0 text-accent-primary">
+                             <Shield className="w-5 h-5 md:w-6 md:h-6" />
+                          </div>
+                          <div className="flex-1 w-full min-w-0">
+                             <p className="text-[10px] md:text-xs font-black text-foreground/60 uppercase tracking-widest mb-2 px-1">Crypto Vault (Optional)</p>
+                             <div className="relative">
+                               <input
+                                 type={showPassword ? "text" : "password"}
+                                 value={password}
+                                 onChange={e => setPassword(e.target.value)}
+                                 placeholder="Enter master decryption key..."
+                                 className="w-full bg-foreground/5 border border-foreground/10 rounded-2xl py-4 md:py-5 pl-6 pr-14 text-xs md:text-sm text-foreground focus:outline-none focus:border-accent-primary/40 focus:ring-1 focus:ring-accent-primary/40 font-mono transition-all"
+                               />
+                               <button 
+                                 onClick={() => setShowPassword(!showPassword)}
+                                 className="absolute right-4 top-1/2 -translate-y-1/2 p-2 hover:bg-foreground/10 rounded-xl text-foreground/40 transition-colors"
+                               >
+                                 {showPassword ? <EyeOff className="w-4 h-4 md:w-5 md:h-5" /> : <Eye className="w-4 h-4 md:w-5 md:h-5" />}
+                               </button>
+                             </div>
+                          </div>
+                        </div>
+
+                        {/* Execute Codec for Desktop is placed here inside main flow */}
+                        <div className="hidden lg:block">
+                           {ExecuteAction}
+                        </div>
+                      </div>
                      )}
 
                      <div className="p-8 bg-background/40 backdrop-blur-2xl rounded-[40px] border border-foreground/5 font-mono shadow-xl text-foreground">
@@ -570,16 +534,16 @@ export default function VideoConverter() {
                        </button>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-8 relative z-10">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-8 relative z-10">
                        {[
                          { label: "Studio Result", val: encodedData.filename },
                          { label: "VCEO Footprint", val: `${(encodedData.size / 1024 / 1024).toFixed(3)} MB` },
                          { label: "Engine Pulse", val: encodedData.compressionMode.toUpperCase() },
                          { label: "Status", val: "LOCKED / CRYPTO-READY" }
                        ].map((item, i) => (
-                         <div key={i} className="p-6 bg-background/40 rounded-3xl border border-foreground/5">
-                            <p className="text-[9px] font-black text-foreground/30 uppercase tracking-widest mb-2 leading-none">{item.label}</p>
-                            <p className="text-sm font-black text-foreground leading-none">{item.val}</p>
+                         <div key={i} className="p-4 md:p-6 bg-background/40 rounded-2xl md:rounded-3xl border border-foreground/5">
+                            <p className="text-[8px] md:text-[9px] font-black text-foreground/30 uppercase tracking-widest mb-1 md:2 leading-none">{item.label}</p>
+                            <p className="text-xs md:text-sm font-black text-foreground leading-none truncate">{item.val}</p>
                          </div>
                        ))}
                     </div>
