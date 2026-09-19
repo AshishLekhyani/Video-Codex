@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import { writeFile, readFile, unlink, readdir, stat } from 'fs/promises';
 import { createReadStream } from 'fs';
+import { Readable } from 'stream';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { platform } from 'os';
@@ -18,9 +19,9 @@ const RUST_BINARY = join(process.cwd(), 'video-codec', 'target_web', 'release', 
 
 // Ensure TEMP_DIR exists
 import { mkdirSync } from 'fs';
-try { mkdirSync(TEMP_DIR, { recursive: true }); } catch (e) {}
+try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {}
 
-// Periodic cleanup of temp directory (files older than 20 minutes for Platinum efficiency)
+// Periodic cleanup: purge temp files older than 20 minutes
 if (process.env.NODE_ENV !== 'test') {
   setInterval(async () => {
     try {
@@ -35,9 +36,9 @@ if (process.env.NODE_ENV !== 'test') {
           if (now - fileStat.mtimeMs > expiry) {
             await unlink(filePath);
           }
-        } catch (e) {}
+        } catch {}
       }
-    } catch (e) {}
+    } catch {}
   }, 1000 * 60 * 10);
 }
 
@@ -64,11 +65,18 @@ async function runCommand(command: string, args: string[]): Promise<void> {
   });
 }
 
+// Maps the UI's 50-100 quality slider onto a continuous libx265 CRF range (35 -> 18).
+// Lower CRF = higher quality/larger file, so the mapping is inverted.
+function qualityToCrf(qualityStr: string): number {
+  const quality = Math.min(100, Math.max(50, parseInt(qualityStr, 10) || 85));
+  const t = (quality - 50) / 50;
+  return Math.round(35 - t * (35 - 18));
+}
+
 function runFfmpeg(input: string, output: string, qualityStr: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    let crf = '28';
-    if (qualityStr && parseInt(qualityStr) < 80) crf = '32';
-    
+    const crf = qualityToCrf(qualityStr);
+
     ffmpeg(input)
       .outputOptions([
         '-vcodec libx265',
@@ -77,7 +85,7 @@ function runFfmpeg(input: string, output: string, qualityStr: string): Promise<v
       ])
       .save(output)
       .on('end', () => resolve())
-      .on('error', (err: any) => reject(new Error(`FFmpeg processing failed: ${err.message}`)));
+      .on('error', (err: Error) => reject(new Error(`FFmpeg processing failed: ${err.message}`)));
   });
 }
 
@@ -94,7 +102,7 @@ export async function POST(request: NextRequest) {
       for (const f of sessionFiles) {
         await unlink(join(TEMP_DIR, f)).catch(() => {});
       }
-    } catch (e) {}
+    } catch {}
   };
 
   try {
@@ -137,10 +145,10 @@ export async function POST(request: NextRequest) {
       
       let args: string[];
       switch (compressionMode) {
-        case 'binary': args = ['binary', targetInput, encodedOutputPath, '0', '4096']; break;
-        case 'context': args = ['context', targetInput, encodedOutputPath, '0', '4096']; break;
-        case 'lossy': args = ['lossy', targetInput, encodedOutputPath, quality, '4096']; break;
-        default: args = ['zstd-json', targetInput, encodedOutputPath, '0', '4096']; break;
+        case 'binary': args = ['binary', targetInput, encodedOutputPath]; break;
+        case 'context': args = ['context', targetInput, encodedOutputPath]; break;
+        case 'lossy': args = ['lossy', targetInput, encodedOutputPath, quality]; break;
+        default: args = ['zstd-json', targetInput, encodedOutputPath, file.name]; break;
       }
       
       await runCommand(RUST_BINARY, args);
@@ -194,8 +202,7 @@ export async function POST(request: NextRequest) {
         } catch {}
       }
       
-      const videoStream = createReadStream(videoPath);
-      // @ts-ignore
+      const videoStream = Readable.toWeb(createReadStream(videoPath)) as ReadableStream;
       return new NextResponse(videoStream, {
         headers: {
           'Content-Type': 'video/mp4',

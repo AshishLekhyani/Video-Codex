@@ -40,10 +40,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Rust
+# Rust (Cargo.lock is intentionally tracked for reproducible binary builds)
 video-codec/target
 video-codec/target_web
-video-codec/Cargo.lock
 
 # Studio Temp Storage
 /temp

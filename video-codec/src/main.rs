@@ -28,8 +28,8 @@ pub struct ZstdBudget {
 }
 
 impl ZstdBudget {
-    pub fn platinum_profile() -> Self {
-        // Safe 2MB window, Max compression level
+    pub fn max_profile() -> Self {
+        // 2MB match window, max compression level
         Self { level: 22, window_log: 21 }
     }
 }
@@ -46,12 +46,12 @@ fn main() -> anyhow::Result<()> {
     let output_path = &args[3];
 
     match mode.as_str() {
-        "zstd-json" => encode_zstd_json(input_path, output_path)?,
+        "zstd-json" => encode_zstd_json(input_path, output_path, args.get(4).map(|s| s.as_str()))?,
         "binary" => encode_binary(input_path, output_path)?,
         "context" => encode_context(input_path, output_path)?,
-        "lossy" => encode_lossy(input_path, output_path, args[4].parse().unwrap_or(85))?,
-        "encrypt" => encrypt_file(input_path, output_path, &args[4])?,
-        "decrypt" => decrypt_file(input_path, output_path, &args[4])?,
+        "lossy" => encode_lossy(input_path, output_path, args.get(4).and_then(|s| s.parse().ok()).unwrap_or(85))?,
+        "encrypt" => encrypt_file(input_path, output_path, args.get(4).map(|s| s.as_str()).unwrap_or(""))?,
+        "decrypt" => decrypt_file(input_path, output_path, args.get(4).map(|s| s.as_str()).unwrap_or(""))?,
         "decode-json" => decode_zstd_json(input_path, output_path)?,
         "decode-bin" => decode_binary(input_path, output_path)?,
         "decode-context" => decode_context(input_path, output_path)?,
@@ -64,11 +64,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn encode_zstd_json(input: &str, output: &str) -> anyhow::Result<()> {
-    let budget = ZstdBudget::platinum_profile();
+fn encode_zstd_json(input: &str, output: &str, display_name: Option<&str>) -> anyhow::Result<()> {
+    let budget = ZstdBudget::max_profile();
     let data = fs::read(input)?;
     let metadata = VideoMetadata {
-        filename: input.to_string(),
+        filename: display_name.unwrap_or(input).to_string(),
         original_size: data.len() as u64,
         timestamp: 0,
     };
@@ -96,7 +96,7 @@ fn decode_zstd_json(input: &str, output: &str) -> anyhow::Result<()> {
     let compressed_data = base64_decode(&payload.data)?;
 
     let mut decoder = ZstdDecoder::new(&compressed_data[..])?;
-    decoder.window_log_max(27)?; // V4 Stability
+    decoder.window_log_max(27)?; // Headroom above the level-22 encoder's 21-bit window
     
     let mut decoded = Vec::new();
     io::Read::read_to_end(&mut decoder, &mut decoded)?;
@@ -121,19 +121,27 @@ fn encode_binary(input: &str, output: &str) -> anyhow::Result<()> {
 }
 
 
-fn decode_binary(input: &str, output: &str) -> anyhow::Result<()> {
+fn decode_zstd_stream(input: &str, output: &str, expected_magic: &[u8; 4]) -> anyhow::Result<()> {
     let mut input_file = File::open(input)?;
     let mut magic = [0u8; 4];
     input_file.read_exact(&mut magic)?;
-    if &magic != b"VCEO" { return Err(anyhow::anyhow!("Not a VCEO file")); }
-    
+    if &magic != expected_magic {
+        let expected = std::str::from_utf8(expected_magic).unwrap_or("?");
+        let found = std::str::from_utf8(&magic).unwrap_or("?");
+        return Err(anyhow::anyhow!("Unexpected file header: expected {}, found {}", expected, found));
+    }
+
     input_file.seek(io::SeekFrom::Start(14))?; // Skip magic + ver + size
     let mut decoder = ZstdDecoder::new(input_file)?;
-    decoder.window_log_max(27)?; // V4 Stability
-    
+    decoder.window_log_max(27)?;
+
     let mut output_file = File::create(output)?;
     io::copy(&mut decoder, &mut output_file)?;
     Ok(())
+}
+
+fn decode_binary(input: &str, output: &str) -> anyhow::Result<()> {
+    decode_zstd_stream(input, output, b"VCEO")
 }
 
 fn encrypt_file(input: &str, output: &str, password: &str) -> anyhow::Result<()> {
@@ -143,7 +151,7 @@ fn encrypt_file(input: &str, output: &str, password: &str) -> anyhow::Result<()>
     rand::thread_rng().fill_bytes(&mut salt);
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-    let params = Params::new(65536, 1, 1, Some(32)).unwrap();
+    let params = Params::new(65536, 3, 1, Some(32)).unwrap();
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
     argon2.hash_password_into(password.as_bytes(), &salt, &mut key).unwrap();
@@ -175,7 +183,7 @@ fn decrypt_file(input: &str, output: &str, password: &str) -> anyhow::Result<()>
     let mut ciphertext = Vec::new();
     input_file.read_to_end(&mut ciphertext)?;
 
-    let params = Params::new(65536, 1, 1, Some(32)).unwrap();
+    let params = Params::new(65536, 3, 1, Some(32)).unwrap();
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
     argon2.hash_password_into(password.as_bytes(), &salt, &mut key).unwrap();
@@ -188,9 +196,9 @@ fn decrypt_file(input: &str, output: &str, password: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-// Stubs for complex modes (Lossy/Context)
 fn encode_lossy(input: &str, output: &str, _quality: u8) -> anyhow::Result<()> {
-    // Lossy simulation (Level 3 - very fast, low compression)
+    // Quality is already applied upstream via the FFmpeg H.265 CRF pass.
+    // This stage just wraps the already-crushed video in a fast zstd envelope.
     let data = fs::read(input)?;
     let mut output_file = File::create(output)?;
     output_file.write_all(b"VCEO")?;
@@ -203,11 +211,11 @@ fn encode_lossy(input: &str, output: &str, _quality: u8) -> anyhow::Result<()> {
 }
 
 fn encode_context(input: &str, output: &str) -> anyhow::Result<()> {
-    // Context Model (Platinum Level 22)
-    let budget = ZstdBudget::platinum_profile();
+    // Max-compression profile: Zstd level 22 with a wider match window.
+    let budget = ZstdBudget::max_profile();
     let data = fs::read(input)?;
     let mut output_file = File::create(output)?;
-    output_file.write_all(b"VCEO")?;
+    output_file.write_all(b"VCTX")?;
     output_file.write_u16::<LittleEndian>(1)?;
     output_file.write_u64::<LittleEndian>(data.len() as u64)?;
     let mut encoder = ZstdEncoder::new(output_file, budget.level)?;
@@ -218,7 +226,7 @@ fn encode_context(input: &str, output: &str) -> anyhow::Result<()> {
 }
 
 fn decode_context(input: &str, output: &str) -> anyhow::Result<()> {
-    decode_binary(input, output)
+    decode_zstd_stream(input, output, b"VCTX")
 }
 
 // Base64 helpers

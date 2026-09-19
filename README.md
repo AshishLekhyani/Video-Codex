@@ -8,10 +8,10 @@ pinned: false
 app_port: 7860
 ---
 
-# 🎞️ Video Codec Studio: Obsidian Platinum (V5.1)
+# 🎞️ Video Codec Studio (v1.0.1)
 
 <div align="center">
-  <p><strong>A high-performance, industrial-grade video transcoding and cryptographic encapsulation suite.</strong></p>
+  <p><strong>A video transcoding and cryptographic encapsulation suite, built on Rust + FFmpeg.</strong></p>
   <img src="https://img.shields.io/badge/Next.js-16+-black?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js" />
   <img src="https://img.shields.io/badge/Rust-1.80+-orange?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/Docker-Enabled-blue?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
@@ -20,17 +20,17 @@ app_port: 7860
 
 <br />
 
-The **Video Codec Studio** is designed for extreme media compression, transcoding, and security. By uniting a custom **Rust Core Engine** with a high-fidelity **Next.js** workspace, it allows users to perform high-efficiency H.265 transcoding, Zstd dictionary compression, and ChaCha20Poly1305 authenticated encryption directly from a unified, premium interface.
+The **Video Codec Studio** handles media compression, transcoding, and encryption. It pairs a custom **Rust core engine** with a **Next.js** workspace to run H.265 transcoding, Zstd compression, and ChaCha20-Poly1305 authenticated encryption, all from one interface. All processing is CPU-bound — there is no GPU acceleration.
 
 ---
 
 ## 🚀 Key Features
 
-*   **⚡ Platinum Rust Engine**: A custom-built, compiled CLI engine (`video-codec`) utilizing the `zstd` crate for extreme byte-reduction. Engineered with an aggressive Memory-First policy ensuring zero-panic stability across arbitrary payloads.
-*   **🎥 Real H.265 Lossy Transcoding**: Integrated `fluent-ffmpeg` pipeline that aggressively crushes video sizes using the `libx265` codec (Constant Rate Factor 28) before encapsulation.
-*   **🔒 Industrial-Grade Encryption**: Secure your video bitstreams with **ChaCha20Poly1305** authenticated encryption. Keys are securely derived using the state-of-the-art memory-hard **Argon2id** algorithm.
-*   **💎 Obsidian Platinum UI**: A premium, "clinical-dark" interface built with **React 19**, **Framer Motion**, and **Tailwind CSS (v4)**. Features real-time hardware status diagnostics, dynamic glow tokens, and a "security-first" header topology.
-*   **🐳 Cloud-Native Architecture**: Fully Dockerized with multi-stage builds. Optimized for high-performance deployment on platforms like **Hugging Face Spaces**.
+*   **⚡ Rust Compression Engine**: A compiled CLI engine (`video-codec`) using the `zstd` crate at levels 11-22 depending on the selected profile. No unsafe code; failures return errors instead of panicking.
+*   **🎥 Real H.265 Lossy Transcoding**: An `fluent-ffmpeg` pipeline transcodes with `libx265`, mapping the UI's quality slider to a continuous CRF range (18-35) before Zstd wraps the result.
+*   **🔒 Real Encryption**: Video bitstreams can be sealed with **ChaCha20-Poly1305** authenticated encryption. Keys are derived per-file with **Argon2id** (64MB memory, 3 passes).
+*   **🖤 Obsidian UI**: A dark, "clinical" interface built with **React 19**, **Framer Motion**, and **Tailwind CSS v4**. Status readouts reflect the actual pipeline in use — no simulated hardware stats.
+*   **🐳 Cloud-Native Architecture**: Fully Dockerized with multi-stage builds. Deploys to platforms like **Hugging Face Spaces**.
 
 ---
 
@@ -40,15 +40,15 @@ The studio operates on a bifurcated architecture, handing off intensive computat
 
 ```mermaid
 graph TD
-    A[Obsidian Platinum UI] -->|Upload Video & Params| B(Next.js API Route)
+    A[Obsidian UI] -->|Upload Video & Params| B(Next.js API Route)
     B --> C{Profile Selection}
     C -->|H.265 Lossy| D[Native FFmpeg libx265]
-    C -->|Binary / Context| E[Direct Flow]
+    C -->|Binary / Max Compression| E[Direct Flow]
     D --> F[Rust Core Engine]
     E --> F
     F --> G{Encryption?}
-    G -->|Yes: ChaCha20/Argon2| H[Encrypted .vceo]
-    G -->|No| I[Standard .vceo]
+    G -->|Yes: ChaCha20-Poly1305/Argon2id| H[Encrypted Output]
+    G -->|No| I[Standard Output]
     H --> J[Client Download]
     I --> J
 ```
@@ -69,10 +69,10 @@ graph TD
 *   **Containerization**: Docker (Debian Bullseye Slim)
 
 ### Cryptographic Core Engine (`video-codec`)
-*   **Language**: Rust (Edition 2024 Stable)
-*   **Compression**: `zstd` (Levels 11 - 22 Platinum)
+*   **Language**: Rust (Edition 2021)
+*   **Compression**: `zstd` (Levels 11, 22 depending on profile)
 *   **Encryption**: `chacha20poly1305`, `argon2`, `rand`
-*   **Serialization**: `serde`, `base64ct`
+*   **Serialization**: `serde`, `base64`
 
 ---
 
@@ -110,7 +110,7 @@ This project includes a highly optimized, multi-stage `Dockerfile` designed spec
 It automatically handles:
 1. Compiling the Rust Engine natively.
 2. Building the Next.js application in `standalone` mode.
-3. Installing native Linux `ffmpeg` libraries into the final Alpine/Debian runtime.
+3. Installing native Linux `ffmpeg` into the final Debian slim runtime.
 
 **To deploy to Hugging Face:**
 Simply create a new Docker Space and push this repository. The `Dockerfile` exposes port `7860` natively.

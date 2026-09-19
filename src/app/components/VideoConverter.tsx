@@ -6,14 +6,10 @@ import {
   Shield, 
   Zap, 
   FileVideo, 
-  Code, 
-  Download, 
-  Copy, 
-  Lock, 
-  Unlock, 
-  Monitor, 
-  Database, 
-  Share2,
+  Code,
+  Copy,
+  Monitor,
+  Database,
   ChevronRight,
   Loader2,
   CheckCircle2,
@@ -34,11 +30,51 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// Keep in sync with video-codec/Cargo.toml
+const ENGINE_VERSION = '1.0.1';
+
 interface EncodedData {
   isBinary: boolean;
   compressionMode: string;
   filename: string;
   size: number;
+  encrypted: boolean;
+}
+
+// Telemetry lines describing the actual pipeline stages for the selected mode —
+// no invented hardware, only what the Rust engine / FFmpeg genuinely do.
+function getTelemetryEvents(mode: 'encode' | 'decode', compressionMode: string, hasPassword: boolean): string[] {
+  const events: string[] = [];
+
+  if (mode === 'encode') {
+    if (hasPassword) events.push('Deriving key via Argon2id (64MB, 3 passes)...');
+    switch (compressionMode) {
+      case 'zstd-json':
+        events.push('Compressing payload: Zstd level 22, 2MB window...');
+        events.push('Encoding compressed bytes as base64 JSON...');
+        break;
+      case 'context':
+        events.push('Compressing payload: Zstd level 22, 2MB window...');
+        events.push('Writing raw VCTX container header...');
+        break;
+      case 'binary':
+        events.push('Compressing payload: Zstd level 11 (fast stream)...');
+        events.push('Writing raw VCEO container header...');
+        break;
+      case 'lossy':
+        events.push('Re-encoding video: libx265, ultrafast preset...');
+        events.push('Wrapping crushed stream in Zstd level 3 envelope...');
+        break;
+    }
+    if (hasPassword) events.push('Sealing payload with ChaCha20-Poly1305...');
+  } else {
+    events.push('Reading container magic bytes...');
+    if (hasPassword) events.push('Decrypting via ChaCha20-Poly1305...');
+    events.push('Decompressing Zstd stream...');
+    events.push('Reassembling output file...');
+  }
+
+  return events;
 }
 
 export default function VideoConverter() {
@@ -68,23 +104,29 @@ export default function VideoConverter() {
     }
   }, [isLightMode]);
 
-  // Simulated Engine Telemetry
+  // Engine Telemetry — cycles through the real pipeline stages for the active job
   useEffect(() => {
-    if (isProcessing) {
-      const telemetryInterval = setInterval(() => {
-        const events = [
-          "Optimizing Zstd window log: 21",
-          "Analyzing entropy density...",
-          "Mapping ChaCha20-Poly1305 nonce...",
-          "Stabilizing bitstream buffers...",
-          "Parallelizing HEVC re-encode...",
-          "Finalizing VCEO binary header..."
-        ];
-        const event = events[Math.floor(Math.random() * events.length)];
-        setLogs(prev => [...prev.slice(-5), `[${new Date().toLocaleTimeString()}] ${event}`]);
-      }, 1200);
-      return () => clearInterval(telemetryInterval);
+    if (!isProcessing) return;
+    const events = getTelemetryEvents(mode, compressionMode, Boolean(password));
+    let i = 0;
+    const telemetryInterval = setInterval(() => {
+      const event = events[i % events.length];
+      i += 1;
+      setLogs(prev => [...prev.slice(-5), `[${new Date().toLocaleTimeString()}] ${event}`]);
+    }, 1200);
+    return () => clearInterval(telemetryInterval);
+  }, [isProcessing, mode, compressionMode, password]);
+
+  // Real elapsed time for the active job (no fabricated throughput numbers)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    if (!isProcessing) {
+      setElapsedSeconds(0);
+      return;
     }
+    const start = Date.now();
+    const t = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(t);
   }, [isProcessing]);
 
   const validateAndSetFile = (file: File) => {
@@ -105,7 +147,7 @@ export default function VideoConverter() {
 
     setIsProcessing(true);
     setError('');
-    setLogs(prev => [...prev, "[SYSTEM] Booting Studio Engine v5.1 Platinum..."]);
+    setLogs(prev => [...prev, `[SYSTEM] Booting Studio Engine v${ENGINE_VERSION}...`]);
 
     try {
       const formData = new FormData();
@@ -127,15 +169,17 @@ export default function VideoConverter() {
       }
 
       if (mode === 'encode') {
-        const isBinaryMode = compressionMode === 'binary' || compressionMode === 'context' || compressionMode === 'lossy';
+        // Must mirror the server's response-type decision in route.ts (isBinary || password)
+        const isRawContainer = compressionMode === 'binary' || compressionMode === 'context' || compressionMode === 'lossy';
+        const isBinaryResponse = isRawContainer || Boolean(password);
         setProcessingStep('Streaming Bitstream...');
-        
-        if (isBinaryMode) {
+
+        if (isBinaryResponse) {
           const blob = await response.blob();
           const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          const extension = password ? '.vceo.enc' : '.vceo';
+          const extension = (isRawContainer ? '.vceo' : '.json') + (password ? '.enc' : '');
           a.download = file.name.replace(/\.[^/.]+$/, '') + extension;
           document.body.appendChild(a);
           a.click();
@@ -147,15 +191,17 @@ export default function VideoConverter() {
             compressionMode,
             filename: file.name,
             size: blob.size,
+            encrypted: Boolean(password),
           });
-          setJsonText(`// BINARY VCEO STREAM DELIVERED\n// Mode: ${compressionMode.toUpperCase()}\n// Protection: ${password ? 'ChaCha20-Poly1305' : 'None'}`);
+          setJsonText(`// ${isRawContainer ? 'BINARY VCEO STREAM' : 'ENCRYPTED JSON PAYLOAD'} DELIVERED\n// Mode: ${compressionMode.toUpperCase()}\n// Protection: ${password ? 'ChaCha20-Poly1305' : 'None'}`);
         } else {
           const data = await response.json();
           setEncodedData({
             isBinary: false,
             compressionMode,
             filename: file.name,
-            size: JSON.stringify(data.data).length,
+            size: data.jsonText.length,
+            encrypted: false,
           });
           setJsonText(data.jsonText);
         }
@@ -229,7 +275,7 @@ export default function VideoConverter() {
               <h1 className="text-sm font-black uppercase tracking-[0.2em] leading-none text-foreground">Studio Engine</h1>
               <p className="text-[10px] font-bold text-foreground/70 tracking-widest mt-1.5 flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                V5.1 PLATINUM
+                V{ENGINE_VERSION}
               </p>
             </div>
           </div>
@@ -258,10 +304,10 @@ export default function VideoConverter() {
               </label>
               <div className="space-y-2">
                 {[
-                  { id: 'zstd-json', label: 'ZSTD+JSON', desc: 'Human-Readable' },
-                  { id: 'binary', label: 'BINARY STREAM', desc: 'Max Efficiency' },
-                  { id: 'context', label: 'CONTEXT MODEL', desc: 'High Entropy' },
-                  { id: 'lossy', label: 'H.265 LOSSY', desc: 'Studio Compact' }
+                  { id: 'zstd-json', label: 'ZSTD+JSON', desc: 'Zstd-22 · Human-Readable' },
+                  { id: 'binary', label: 'BINARY STREAM', desc: 'Zstd-11 · Fastest' },
+                  { id: 'context', label: 'MAX COMPRESSION', desc: 'Zstd-22 · Raw Binary' },
+                  { id: 'lossy', label: 'H.265 LOSSY', desc: 'Real Re-encode' }
                 ].map(c => (
                     <button
                       key={c.id}
@@ -317,8 +363,8 @@ export default function VideoConverter() {
           <div className="pt-6 border-t border-foreground/10 space-y-4">
             {[
               { icon: <Monitor className="w-3.5 h-3.5" />, label: "Engine Status", val: isProcessing ? "ACTIVE" : "READY", active: isProcessing },
-              { icon: <Database className="w-3.5 h-3.5" />, label: "Cache Layer", val: "L3 / 256MB", active: true },
-              { icon: <Zap className="w-3.5 h-3.5" />, label: "Acceleration", val: "NVIDIA/METAL", active: true }
+              { icon: <Cpu className="w-3.5 h-3.5" />, label: "Compute", val: "CPU · RUST+FFMPEG", active: true },
+              { icon: <Database className="w-3.5 h-3.5" />, label: "Temp Storage", val: "AUTO-PURGE / 20MIN", active: true }
             ].map((stat, i) => (
               <div key={i} className="flex items-center justify-between">
                 <span className="text-[9px] font-bold text-foreground/70 flex items-center gap-3 uppercase tracking-widest">
@@ -409,7 +455,7 @@ export default function VideoConverter() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <h3 className="text-lg md:text-3xl font-black text-foreground tracking-tighter leading-tight md:leading-none truncate" title={file.name}>{file.name}</h3>
-                      <p className="text-[9px] md:text-[10px] font-black text-foreground/40 uppercase tracking-[0.2em] mt-2 md:mt-3 leading-none truncate">{(file.size / 1024 / 1024).toFixed(2)} MB • VERIFIED</p>
+                      <p className="text-[9px] md:text-[10px] font-black text-foreground/40 uppercase tracking-[0.2em] mt-2 md:mt-3 leading-none truncate">{(file.size / 1024 / 1024).toFixed(2)} MB • READY</p>
                     </div>
                   </div>
                   <button 
@@ -440,17 +486,16 @@ export default function VideoConverter() {
                             </div>
                             
                             <div className="max-w-md mx-auto space-y-6">
-                              <div className="h-1.5 w-full bg-foreground/5 rounded-full overflow-hidden">
-                                <motion.div 
-                                  initial={{ width: "0%" }}
-                                  animate={{ width: "100%" }}
-                                  transition={{ duration: 15, ease: "circIn" }}
-                                  className="h-full bg-gradient-to-r from-accent-primary to-accent-secondary shadow-glow"
+                              <div className="h-1.5 w-full bg-foreground/5 rounded-full overflow-hidden relative">
+                                <motion.div
+                                  animate={{ x: ["-100%", "400%"] }}
+                                  transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+                                  className="absolute inset-y-0 left-0 w-1/4 bg-gradient-to-r from-accent-primary to-accent-secondary shadow-glow rounded-full"
                                 />
                               </div>
                               <div className="flex justify-between text-[9px] font-black text-foreground/30 uppercase tracking-[0.3em] tabular-nums leading-none">
-                                 <span>Link: 0x2A</span>
-                                 <span>1.2 GB/s Transmit</span>
+                                 <span>Elapsed: {elapsedSeconds}s</span>
+                                 <span>{mode === 'encode' ? compressionMode.toUpperCase() : 'AUTO-DETECT'}</span>
                               </div>
                             </div>
                           </div>
@@ -470,7 +515,7 @@ export default function VideoConverter() {
                               type={showPassword ? "text" : "password"}
                               value={password}
                               onChange={e => setPassword(e.target.value)}
-                              placeholder="Enter master decryption key..."
+                              placeholder={mode === 'encode' ? 'Set an encryption passphrase...' : 'Enter the decryption passphrase...'}
                               className="w-full bg-foreground/5 border border-foreground/10 rounded-2xl py-4 pl-[60px] pr-14 text-sm text-foreground focus:outline-none focus:border-accent-primary/40 focus:ring-1 focus:ring-accent-primary/40 font-mono transition-all placeholder:text-foreground/25"
                             />
                             <button
@@ -537,9 +582,9 @@ export default function VideoConverter() {
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-8 relative z-10">
                        {[
                          { label: "Studio Result", val: encodedData.filename },
-                         { label: "VCEO Footprint", val: `${(encodedData.size / 1024 / 1024).toFixed(3)} MB` },
+                         { label: encodedData.isBinary ? "VCEO Footprint" : "JSON Footprint", val: `${(encodedData.size / 1024 / 1024).toFixed(3)} MB` },
                          { label: "Engine Pulse", val: encodedData.compressionMode.toUpperCase() },
-                         { label: "Status", val: "LOCKED / CRYPTO-READY" }
+                         { label: "Status", val: encodedData.encrypted ? "ENCRYPTED (CHACHA20)" : "UNENCRYPTED" }
                        ].map((item, i) => (
                          <div key={i} className="p-4 md:p-6 bg-background/40 rounded-2xl md:rounded-3xl border border-foreground/5">
                             <p className="text-[8px] md:text-[9px] font-black text-foreground/30 uppercase tracking-widest mb-1 md:2 leading-none">{item.label}</p>
