@@ -1,5 +1,5 @@
 # Stage 1: Build the Rust Engine
-FROM rust:slim-bullseye AS rust-builder
+FROM rust:slim-bookworm AS rust-builder
 WORKDIR /app
 # We create a dummy project to cache dependencies if needed, but for simplicity we'll just build.
 COPY video-codec ./video-codec
@@ -7,7 +7,7 @@ COPY video-codec ./video-codec
 RUN cd video-codec && cargo build --release
 
 # Stage 2: Build the Next.js App
-FROM node:20-bullseye AS node-builder
+FROM node:20-bookworm AS node-builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
@@ -15,7 +15,7 @@ COPY . .
 RUN npm run build
 
 # Stage 3: The Hugging Face Production Runtime
-FROM node:20-bullseye-slim
+FROM node:20-bookworm-slim
 WORKDIR /app
 
 # Install native Linux FFmpeg for heavy H.265 transcoding

@@ -66,7 +66,7 @@ graph TD
 ### Backend & Orchestration
 *   **Server**: Node.js (Edge-Compatible Route Handlers)
 *   **Transcoding**: Fluent-FFmpeg, FFmpeg-Static
-*   **Containerization**: Docker (Debian Bullseye Slim)
+*   **Containerization**: Docker (Debian Bookworm Slim)
 
 ### Cryptographic Core Engine (`video-codec`)
 *   **Language**: Rust (Edition 2021)
