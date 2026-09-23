@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
-import { writeFile, readFile, unlink, readdir, stat } from 'fs/promises';
+import { writeFile, readFile, unlink, readdir, stat, open } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { Readable } from 'stream';
 import { join } from 'path';
@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import { platform } from 'os';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
+import { setProgress, clearProgress } from './progressStore';
 
 if (ffmpegStatic) {
   ffmpeg.setFfmpegPath(ffmpegStatic);
@@ -15,6 +16,14 @@ if (ffmpegStatic) {
 
 const TEMP_DIR = join(process.cwd(), 'temp');
 const RUST_BINARY = join(process.cwd(), 'video-codec', 'target_web', 'release', platform() === 'win32' ? 'video-codec.exe' : 'video-codec');
+
+// Base64 inflates data by ~4/3, and JSON adds a little more on top of that.
+// fs.readFile() (used to build the response) hard-refuses any file over 2GiB
+// (ERR_FS_FILE_TOO_LARGE), so once the *compressed* payload could plausibly
+// cross that line after base64 inflation, fall back to the raw-binary
+// container instead of json+base64. Already-compressed video barely shrinks
+// under Zstd, so this is sized off the original (worst case ~1:1 ratio).
+const LARGE_FILE_THRESHOLD = 1.2 * 1024 * 1024 * 1024; // 1.2 GiB
 
 
 // Ensure TEMP_DIR exists
@@ -42,16 +51,30 @@ if (process.env.NODE_ENV !== 'test') {
   }, 1000 * 60 * 10);
 }
 
-async function runCommand(command: string, args: string[]): Promise<void> {
+async function runCommand(command: string, args: string[], onProgress?: (pct: number) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const process = spawn(command, args);
     let errorOutput = '';
+    let stderrLineBuffer = '';
 
     process.stderr.on('data', (data) => {
-      errorOutput += data.toString();
+      stderrLineBuffer += data.toString();
+      const lines = stderrLineBuffer.split('\n');
+      stderrLineBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const match = line.match(/^PROGRESS:(\d+)/);
+        if (match) {
+          onProgress?.(Math.min(100, parseInt(match[1], 10)));
+        } else if (line.trim()) {
+          errorOutput += line + '\n';
+        }
+      }
     });
 
     process.on('close', (code) => {
+      if (stderrLineBuffer.trim() && !stderrLineBuffer.match(/^PROGRESS:\d+/)) {
+        errorOutput += stderrLineBuffer;
+      }
       if (code === 0) {
         resolve();
       } else {
@@ -73,7 +96,7 @@ function qualityToCrf(qualityStr: string): number {
   return Math.round(35 - t * (35 - 18));
 }
 
-function runFfmpeg(input: string, output: string, qualityStr: string): Promise<void> {
+function runFfmpeg(input: string, output: string, qualityStr: string, onProgress?: (pct: number) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const crf = qualityToCrf(qualityStr);
 
@@ -83,17 +106,27 @@ function runFfmpeg(input: string, output: string, qualityStr: string): Promise<v
         `-crf ${crf}`,
         '-preset ultrafast' // Keep UX snappy
       ])
+      .on('progress', (p: { percent?: number }) => {
+        if (onProgress && typeof p.percent === 'number' && isFinite(p.percent)) {
+          onProgress(Math.max(0, Math.min(100, Math.round(p.percent))));
+        }
+      })
       .save(output)
       .on('end', () => resolve())
       .on('error', (err: Error) => reject(new Error(`FFmpeg processing failed: ${err.message}`)));
   });
 }
 
+// Only [0-9a-f-] of UUID length — this feeds directly into temp file paths,
+// so a malformed/attacker-supplied jobId must never be trusted as-is.
+const JOB_ID_PATTERN = /^[0-9a-fA-F-]{36}$/;
+
 export async function POST(request: NextRequest) {
-  const id = randomUUID();
-  const inputPath = join(TEMP_DIR, `${id}_input`);
-  const outputPath = join(TEMP_DIR, `${id}_output`);
-  
+  let id: string = randomUUID();
+  let inputPath = join(TEMP_DIR, `${id}_input`);
+  let outputPath = join(TEMP_DIR, `${id}_output`);
+  let cleanupHandledByStream = false;
+
   // Hardened cleanup: We seek all files prefixed with the session ID
   const hardenedCleanup = async () => {
     try {
@@ -105,6 +138,18 @@ export async function POST(request: NextRequest) {
     } catch {}
   };
 
+  // Streams a file as the response body and only deletes temp files once the
+  // stream actually finishes — deleting eagerly (like the old readFile-based
+  // response did implicitly, since it fully buffered first) would race the
+  // in-flight download and truncate it.
+  const streamFileAsResponse = (path: string, headers: Record<string, string>) => {
+    const nodeStream = createReadStream(path);
+    nodeStream.on('close', () => { hardenedCleanup().catch(() => {}); });
+    nodeStream.on('error', () => { hardenedCleanup().catch(() => {}); });
+    cleanupHandledByStream = true;
+    return new NextResponse(Readable.toWeb(nodeStream) as ReadableStream, { headers });
+  };
+
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;
@@ -112,10 +157,19 @@ export async function POST(request: NextRequest) {
     const compressionMode = (formData.get('compressionMode') as string) || 'zstd-json';
     const quality = (formData.get('quality') as string) || '85';
     const password = formData.get('password') as string;
+    const clientJobId = formData.get('jobId') as string | null;
+
+    if (clientJobId && JOB_ID_PATTERN.test(clientJobId)) {
+      id = clientJobId;
+      inputPath = join(TEMP_DIR, `${id}_input`);
+      outputPath = join(TEMP_DIR, `${id}_output`);
+    }
 
     if (!file) {
       return NextResponse.json({ error: 'No payload provided' }, { status: 400 });
     }
+
+    setProgress(id, { stage: 'Receiving upload', percent: 0, done: false });
 
     const buffer = Buffer.from(await file.arrayBuffer());
     let currentInputPath = inputPath;
@@ -126,100 +180,139 @@ export async function POST(request: NextRequest) {
       if (!password) {
         return NextResponse.json({ error: 'Payload is encrypted. Decryption key required.' }, { status: 400 });
       }
+      setProgress(id, { stage: 'Decrypting', percent: 0, done: false });
       const decryptedPath = `${inputPath}_decrypted`;
       await runCommand(RUST_BINARY, ['decrypt', currentInputPath, decryptedPath, password]);
       currentInputPath = decryptedPath;
     }
 
     if (mode === 'encode') {
-      const isBinary = compressionMode === 'binary' || compressionMode === 'context' || compressionMode === 'lossy';
+      // Already-compressed video barely shrinks under Zstd, so json+base64
+      // inflation can push the output past the 2GiB fs streaming-response
+      // ceiling even for inputs comfortably under it. Fall back to the
+      // equivalent raw-binary container (same Zstd level, no json/base64).
+      let effectiveCompressionMode = compressionMode;
+      let fellBackFromJson = false;
+      if (effectiveCompressionMode === 'zstd-json' && buffer.length > LARGE_FILE_THRESHOLD) {
+        effectiveCompressionMode = 'context';
+        fellBackFromJson = true;
+      }
+
+      const isBinary = effectiveCompressionMode === 'binary' || effectiveCompressionMode === 'context' || effectiveCompressionMode === 'lossy';
       const outputExt = isBinary ? 'bin' : 'json';
       const encodedOutputPath = `${outputPath}.${outputExt}`;
 
       let targetInput = currentInputPath;
-      if (compressionMode === 'lossy') {
+      if (effectiveCompressionMode === 'lossy') {
         const crushedVideoPath = `${outputPath}_crushed.mp4`;
-        await runFfmpeg(targetInput, crushedVideoPath, quality);
+        setProgress(id, { stage: 'Re-encoding video (H.265)', percent: 0, done: false });
+        await runFfmpeg(targetInput, crushedVideoPath, quality, (pct) =>
+          setProgress(id, { stage: 'Re-encoding video (H.265)', percent: pct, done: false })
+        );
         targetInput = crushedVideoPath;
       }
-      
+
       let args: string[];
-      switch (compressionMode) {
+      switch (effectiveCompressionMode) {
         case 'binary': args = ['binary', targetInput, encodedOutputPath]; break;
         case 'context': args = ['context', targetInput, encodedOutputPath]; break;
         case 'lossy': args = ['lossy', targetInput, encodedOutputPath, quality]; break;
         default: args = ['zstd-json', targetInput, encodedOutputPath, file.name]; break;
       }
-      
-      await runCommand(RUST_BINARY, args);
-      
+
+      setProgress(id, { stage: 'Compressing', percent: 0, done: false });
+      await runCommand(RUST_BINARY, args, (pct) =>
+        setProgress(id, { stage: 'Compressing', percent: pct, done: false })
+      );
+
       let finalPath = encodedOutputPath;
       let finalFilename = file.name.replace(/\.[^/.]+$/, '') + (isBinary ? '.vceo' : '.json');
-      
+
       if (password) {
+        setProgress(id, { stage: 'Encrypting', percent: 0, done: false });
         const encryptedPath = `${encodedOutputPath}.enc`;
         await runCommand(RUST_BINARY, ['encrypt', encodedOutputPath, encryptedPath, password]);
         finalPath = encryptedPath;
         finalFilename += '.enc';
       }
-      
-      const responseFile = await readFile(finalPath);
-      
+
+      const stats = await stat(finalPath);
+      setProgress(id, { stage: 'Complete', percent: 100, done: true });
+
+      const sharedHeaders: Record<string, string> = {
+        'X-Compression-Mode': effectiveCompressionMode,
+        'X-Job-Id': id,
+        'Content-Length': String(stats.size),
+        ...(fellBackFromJson ? { 'X-Compression-Fallback': 'true' } : {}),
+      };
+
       if (isBinary || password) {
-        return new NextResponse(responseFile, {
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${finalFilename}"`,
-          },
+        return streamFileAsResponse(finalPath, {
+          ...sharedHeaders,
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${finalFilename}"`,
         });
       } else {
-        return NextResponse.json({
-          success: true,
-          data: JSON.parse(responseFile.toString('utf-8')),
-          jsonText: responseFile.toString('utf-8'),
-          compressionMode,
+        return streamFileAsResponse(finalPath, {
+          ...sharedHeaders,
+          'Content-Type': 'application/json',
         });
       }
     } else {
-      // Decode
-      const inputBuffer = await readFile(currentInputPath);
+      // Decode — peek just the magic bytes instead of reading the whole
+      // (potentially multi-GB) compressed file into memory.
       let decodeType = 'decode-json';
-      
-      if (inputBuffer.length >= 4) {
-        const magic = inputBuffer.slice(0, 4).toString('ascii');
+      const handle = await open(currentInputPath, 'r');
+      try {
+        const magicBuf = Buffer.alloc(4);
+        await handle.read(magicBuf, 0, 4, 0);
+        const magic = magicBuf.toString('ascii');
         if (magic === 'VCEO') decodeType = 'decode-bin';
         else if (magic === 'VCTX') decodeType = 'decode-context';
+      } finally {
+        await handle.close();
       }
-      
+
       const videoPath = `${outputPath}.mp4`;
-      await runCommand(RUST_BINARY, [decodeType, currentInputPath, videoPath]);
-      
+      setProgress(id, { stage: 'Decoding', percent: 0, done: false });
+      await runCommand(RUST_BINARY, [decodeType, currentInputPath, videoPath], (pct) =>
+        setProgress(id, { stage: 'Decoding', percent: pct, done: false })
+      );
+
       let filename = 'decoded_video.mp4';
       if (decodeType === 'decode-json') {
+        // Only the json container needs a full read — inherent to the format
+        // (base64+JSON can't be scanned for a header the way the binary ones can).
         try {
+          const inputBuffer = await readFile(currentInputPath);
           const parsed = JSON.parse(inputBuffer.toString('utf-8'));
           filename = parsed.metadata?.filename || parsed.filename || filename;
         } catch {}
       }
-      
-      const videoStream = Readable.toWeb(createReadStream(videoPath)) as ReadableStream;
-      return new NextResponse(videoStream, {
-        headers: {
-          'Content-Type': 'video/mp4',
-          'Content-Disposition': `attachment; filename="${filename}"`,
-        },
+
+      setProgress(id, { stage: 'Complete', percent: 100, done: true });
+
+      return streamFileAsResponse(videoPath, {
+        'Content-Type': 'video/mp4',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'X-Job-Id': id,
       });
     }
   } catch (error: unknown) {
     const error_obj = error instanceof Error ? error : new Error(String(error));
     console.error('Conversion error:', error_obj);
+    setProgress(id, { stage: 'Error', percent: 0, done: true, error: error_obj.message });
     return NextResponse.json(
       { error: 'Engine conversion failed', details: error_obj.message },
       { status: 500 }
     );
   } finally {
-    // Guaranteed Session-Wide Cleanup
-    await hardenedCleanup();
+    // Guaranteed Session-Wide Cleanup — deferred to the stream's own close/error
+    // handler on the success paths so we don't delete a file mid-download.
+    if (!cleanupHandledByStream) {
+      await hardenedCleanup();
+    }
+    setTimeout(() => clearProgress(id), 5000);
   }
 }
 

@@ -41,42 +41,6 @@ interface EncodedData {
   encrypted: boolean;
 }
 
-// Telemetry lines describing the actual pipeline stages for the selected mode —
-// no invented hardware, only what the Rust engine / FFmpeg genuinely do.
-function getTelemetryEvents(mode: 'encode' | 'decode', compressionMode: string, hasPassword: boolean): string[] {
-  const events: string[] = [];
-
-  if (mode === 'encode') {
-    if (hasPassword) events.push('Deriving key via Argon2id (64MB, 3 passes)...');
-    switch (compressionMode) {
-      case 'zstd-json':
-        events.push('Compressing payload: Zstd level 22, 2MB window...');
-        events.push('Encoding compressed bytes as base64 JSON...');
-        break;
-      case 'context':
-        events.push('Compressing payload: Zstd level 22, 2MB window...');
-        events.push('Writing raw VCTX container header...');
-        break;
-      case 'binary':
-        events.push('Compressing payload: Zstd level 11 (fast stream)...');
-        events.push('Writing raw VCEO container header...');
-        break;
-      case 'lossy':
-        events.push('Re-encoding video: libx265, ultrafast preset...');
-        events.push('Wrapping crushed stream in Zstd level 3 envelope...');
-        break;
-    }
-    if (hasPassword) events.push('Sealing payload with ChaCha20-Poly1305...');
-  } else {
-    events.push('Reading container magic bytes...');
-    if (hasPassword) events.push('Decrypting via ChaCha20-Poly1305...');
-    events.push('Decompressing Zstd stream...');
-    events.push('Reassembling output file...');
-  }
-
-  return events;
-}
-
 export default function VideoConverter() {
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [compressionMode, setCompressionMode] = useState<'zstd-json' | 'binary' | 'context' | 'lossy'>('zstd-json');
@@ -84,7 +48,11 @@ export default function VideoConverter() {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processingStep, setProcessingStep] = useState<string>('');
+  const [phase, setPhase] = useState<'idle' | 'uploading' | 'processing' | 'done'>('idle');
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [serverStage, setServerStage] = useState('');
+  const [serverPercent, setServerPercent] = useState(0);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const [encodedData, setEncodedData] = useState<EncodedData | null>(null);
   const [jsonText, setJsonText] = useState<string>('');
   const [error, setError] = useState<string>('');
@@ -104,18 +72,10 @@ export default function VideoConverter() {
     }
   }, [isLightMode]);
 
-  // Engine Telemetry — cycles through the real pipeline stages for the active job
+  // Close the progress SSE connection if the component unmounts mid-job
   useEffect(() => {
-    if (!isProcessing) return;
-    const events = getTelemetryEvents(mode, compressionMode, Boolean(password));
-    let i = 0;
-    const telemetryInterval = setInterval(() => {
-      const event = events[i % events.length];
-      i += 1;
-      setLogs(prev => [...prev.slice(-5), `[${new Date().toLocaleTimeString()}] ${event}`]);
-    }, 1200);
-    return () => clearInterval(telemetryInterval);
-  }, [isProcessing, mode, compressionMode, password]);
+    return () => { eventSourceRef.current?.close(); };
+  }, []);
 
   // Real elapsed time for the active job (no fabricated throughput numbers)
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -142,40 +102,91 @@ export default function VideoConverter() {
     setFile(file);
   };
 
-  const handleConvert = async () => {
+  const handleConvert = () => {
     if (!file) return;
 
     setIsProcessing(true);
     setError('');
+    setPhase('uploading');
+    setUploadPercent(0);
+    setServerStage('');
+    setServerPercent(0);
     setLogs(prev => [...prev, `[SYSTEM] Booting Studio Engine v${ENGINE_VERSION}...`]);
 
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('mode', mode);
-      formData.append('compressionMode', compressionMode);
-      formData.append('quality', quality.toString());
-      if (password) formData.append('password', password);
+    const jobId = crypto.randomUUID();
+    let lastStage = '';
 
-      setProcessingStep('Compute Allocation...');
-      const response = await fetch('/api/convert', {
-        method: 'POST',
-        body: formData,
-      });
+    eventSourceRef.current?.close();
+    const es = new EventSource(`/api/convert/progress?id=${jobId}`);
+    eventSourceRef.current = es;
+    es.onmessage = (evt) => {
+      try {
+        const data = JSON.parse(evt.data) as { stage: string; percent: number; done: boolean };
+        if (data.stage && data.stage !== lastStage) {
+          lastStage = data.stage;
+          setLogs(prev => [...prev.slice(-5), `[${new Date().toLocaleTimeString()}] ${data.stage}...`]);
+        }
+        setServerStage(data.stage);
+        setServerPercent(data.percent ?? 0);
+        if (data.done) es.close();
+      } catch {}
+    };
+    es.onerror = () => es.close();
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Engine Error');
+    const finish = () => {
+      eventSourceRef.current?.close();
+      setIsProcessing(false);
+      setPhase('done');
+    };
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('mode', mode);
+    formData.append('compressionMode', compressionMode);
+    formData.append('quality', quality.toString());
+    formData.append('jobId', jobId);
+    if (password) formData.append('password', password);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/convert');
+    xhr.responseType = 'blob';
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        setUploadPercent(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+    xhr.upload.onload = () => {
+      setPhase('processing');
+      setLogs(prev => [...prev.slice(-5), `[SYSTEM] Upload complete, engine processing...`]);
+    };
+
+    xhr.onload = async () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        let message = 'Engine Error';
+        try {
+          const parsed = JSON.parse(await (xhr.response as Blob).text());
+          message = parsed.error || message;
+        } catch {}
+        setError(message);
+        setLogs(prev => [...prev, `[EXCEPTION] ${message}`]);
+        finish();
+        return;
+      }
+
+      const modeUsed = xhr.getResponseHeader('X-Compression-Mode') || compressionMode;
+      if (xhr.getResponseHeader('X-Compression-Fallback') === 'true') {
+        setLogs(prev => [...prev, `[SYSTEM] File too large for JSON+Base64 — switched to raw binary output automatically.`]);
       }
 
       if (mode === 'encode') {
-        // Must mirror the server's response-type decision in route.ts (isBinary || password)
-        const isRawContainer = compressionMode === 'binary' || compressionMode === 'context' || compressionMode === 'lossy';
+        // Mirrors the server's response-type decision in route.ts (isBinary || password),
+        // but keyed off the mode it actually used (may differ from what was requested).
+        const isRawContainer = modeUsed === 'binary' || modeUsed === 'context' || modeUsed === 'lossy';
         const isBinaryResponse = isRawContainer || Boolean(password);
-        setProcessingStep('Streaming Bitstream...');
 
         if (isBinaryResponse) {
-          const blob = await response.blob();
+          const blob = xhr.response as Blob;
           const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
@@ -185,36 +196,36 @@ export default function VideoConverter() {
           a.click();
           document.body.removeChild(a);
           window.URL.revokeObjectURL(url);
-          
+
           setEncodedData({
             isBinary: true,
-            compressionMode,
+            compressionMode: modeUsed,
             filename: file.name,
             size: blob.size,
             encrypted: Boolean(password),
           });
-          setJsonText(`// ${isRawContainer ? 'BINARY VCEO STREAM' : 'ENCRYPTED JSON PAYLOAD'} DELIVERED\n// Mode: ${compressionMode.toUpperCase()}\n// Protection: ${password ? 'ChaCha20-Poly1305' : 'None'}`);
+          setJsonText(`// ${isRawContainer ? 'BINARY VCEO STREAM' : 'ENCRYPTED JSON PAYLOAD'} DELIVERED\n// Mode: ${modeUsed.toUpperCase()}\n// Protection: ${password ? 'ChaCha20-Poly1305' : 'None'}`);
         } else {
-          const data = await response.json();
+          const text = await (xhr.response as Blob).text();
           setEncodedData({
             isBinary: false,
-            compressionMode,
+            compressionMode: modeUsed,
             filename: file.name,
-            size: data.jsonText.length,
+            size: text.length,
             encrypted: false,
           });
-          setJsonText(data.jsonText);
+          setJsonText(text);
         }
       } else {
-        const blob = await response.blob();
+        const blob = xhr.response as Blob;
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const contentDisposition = response.headers.get('Content-Disposition');
+        const contentDisposition = xhr.getResponseHeader('Content-Disposition');
         let filename = 'decoded_video.mp4';
         if (contentDisposition) {
-            const match = contentDisposition.match(/filename="(.+)"/);
-            if (match) filename = match[1];
+          const match = contentDisposition.match(/filename="(.+)"/);
+          if (match) filename = match[1];
         }
         a.download = filename;
         document.body.appendChild(a);
@@ -223,14 +234,18 @@ export default function VideoConverter() {
         window.URL.revokeObjectURL(url);
         setLogs(prev => [...prev, `[SYSTEM] Stream decoupled: ${filename} saved.`]);
       }
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      setError(errorMsg);
-      setLogs(prev => [...prev, `[EXCEPTION] ${errorMsg}`]);
-    } finally {
-      setIsProcessing(false);
-      setProcessingStep('');
-    }
+
+      finish();
+    };
+
+    xhr.onerror = () => {
+      const msg = 'Network error during transfer';
+      setError(msg);
+      setLogs(prev => [...prev, `[EXCEPTION] ${msg}`]);
+      finish();
+    };
+
+    xhr.send(formData);
   };
 
   const copyToClipboard = () => {
@@ -482,19 +497,20 @@ export default function VideoConverter() {
                        <div className="p-20 bg-surface/50 backdrop-blur-3xl rounded-[64px] border border-foreground/5 text-center space-y-16 relative overflow-hidden shadow-2xl">
                           <div className="relative z-10">
                             <div className="inline-flex items-center gap-4 px-8 py-3 rounded-full bg-accent-primary/5 border border-accent-primary/20 text-accent-primary text-[10px] font-black uppercase tracking-[0.4em] mb-16 animate-pulse">
-                              <Loader2 className="w-4 h-4 animate-spin text-accent-primary" /> {processingStep}
+                              <Loader2 className="w-4 h-4 animate-spin text-accent-primary" /> {phase === 'uploading' ? 'Uploading' : (serverStage || 'Processing')}
                             </div>
-                            
+
                             <div className="max-w-md mx-auto space-y-6">
                               <div className="h-1.5 w-full bg-foreground/5 rounded-full overflow-hidden relative">
                                 <motion.div
-                                  animate={{ x: ["-100%", "400%"] }}
-                                  transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-                                  className="absolute inset-y-0 left-0 w-1/4 bg-gradient-to-r from-accent-primary to-accent-secondary shadow-glow rounded-full"
+                                  initial={false}
+                                  animate={{ width: `${phase === 'uploading' ? uploadPercent : serverPercent}%` }}
+                                  transition={{ duration: 0.3, ease: "easeOut" }}
+                                  className="absolute inset-y-0 left-0 bg-gradient-to-r from-accent-primary to-accent-secondary shadow-glow rounded-full"
                                 />
                               </div>
                               <div className="flex justify-between text-[9px] font-black text-foreground/30 uppercase tracking-[0.3em] tabular-nums leading-none">
-                                 <span>Elapsed: {elapsedSeconds}s</span>
+                                 <span>Elapsed: {elapsedSeconds}s · {phase === 'uploading' ? uploadPercent : serverPercent}%</span>
                                  <span>{mode === 'encode' ? compressionMode.toUpperCase() : 'AUTO-DETECT'}</span>
                               </div>
                             </div>
