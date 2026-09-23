@@ -41,11 +41,22 @@ interface EncodedData {
   encrypted: boolean;
 }
 
+interface BatchEntry {
+  file: File;
+  relativePath: string;
+}
+
 export default function VideoConverter() {
   const [mode, setMode] = useState<'encode' | 'decode'>('encode');
   const [compressionMode, setCompressionMode] = useState<'zstd-json' | 'binary' | 'context' | 'lossy'>('zstd-json');
   const [quality, setQuality] = useState(85);
   const [file, setFile] = useState<File | null>(null);
+  // 'single' is the original (v1) behaviour, kept as the default — 'batch'
+  // packs a folder or multi-file selection into one sealed archive instead.
+  const [inputMode, setInputMode] = useState<'single' | 'batch'>('single');
+  const [batchFiles, setBatchFiles] = useState<BatchEntry[]>([]);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const multiFileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'uploading' | 'processing' | 'done'>('idle');
@@ -94,7 +105,7 @@ export default function VideoConverter() {
     setEncodedData(null);
     setJsonText('');
     setLogs([`[SYSTEM] IO: Handshaking file ${file.name}`]);
-    
+
     if (mode === 'encode' && !file.type.startsWith('video/')) {
         setError('Engine requires a valid video stream source');
         return;
@@ -102,8 +113,32 @@ export default function VideoConverter() {
     setFile(file);
   };
 
+  // Batch mode accepts any file type (folders can contain anything), so there's
+  // no video-type gate here — everything just gets packed into one archive.
+  const setBatchSelection = (fileList: FileList) => {
+    setError('');
+    setEncodedData(null);
+    setJsonText('');
+    const entries: BatchEntry[] = Array.from(fileList).map(f => ({
+      file: f,
+      relativePath: f.webkitRelativePath || f.name,
+    }));
+    setBatchFiles(entries);
+    setLogs([`[SYSTEM] IO: Handshaking ${entries.length} file(s)`]);
+  };
+
+  const batchTotalSize = batchFiles.reduce((sum, e) => sum + e.file.size, 0);
+  const hasPayload = inputMode === 'single' ? Boolean(file) : batchFiles.length > 0;
+  const clearPayload = () => {
+    setFile(null);
+    setBatchFiles([]);
+    setEncodedData(null);
+    setError('');
+    setLogs([]);
+  };
+
   const handleConvert = () => {
-    if (!file) return;
+    if (!hasPayload) return;
 
     setIsProcessing(true);
     setError('');
@@ -140,12 +175,23 @@ export default function VideoConverter() {
     };
 
     const formData = new FormData();
-    formData.append('file', file);
     formData.append('mode', mode);
     formData.append('compressionMode', compressionMode);
     formData.append('quality', quality.toString());
     formData.append('jobId', jobId);
     if (password) formData.append('password', password);
+
+    if (inputMode === 'batch') {
+      formData.append('batchMode', 'true');
+      const rootName = batchFiles[0]?.relativePath.split('/')[0] || 'archive';
+      formData.append('archiveName', rootName);
+      for (const entry of batchFiles) {
+        formData.append('files', entry.file);
+        formData.append('paths', entry.relativePath);
+      }
+    } else if (file) {
+      formData.append('file', file);
+    }
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/convert');
@@ -179,6 +225,12 @@ export default function VideoConverter() {
         setLogs(prev => [...prev, `[SYSTEM] File too large for JSON+Base64 — switched to raw binary output automatically.`]);
       }
 
+      const sourceLabel = inputMode === 'batch'
+        ? `${batchFiles[0]?.relativePath.split('/')[0] || 'archive'} (${batchFiles.length} files)`
+        : (file?.name || 'payload');
+      const cdMatch = xhr.getResponseHeader('Content-Disposition')?.match(/filename="(.+)"/);
+      const serverFilename = cdMatch ? cdMatch[1] : null;
+
       if (mode === 'encode') {
         // Mirrors the server's response-type decision in route.ts (isBinary || password),
         // but keyed off the mode it actually used (may differ from what was requested).
@@ -191,7 +243,9 @@ export default function VideoConverter() {
           const a = document.createElement('a');
           a.href = url;
           const extension = (isRawContainer ? '.vceo' : '.json') + (password ? '.enc' : '');
-          a.download = file.name.replace(/\.[^/.]+$/, '') + extension;
+          a.download = serverFilename || (inputMode === 'batch'
+            ? (batchFiles[0]?.relativePath.split('/')[0] || 'archive') + extension
+            : (file?.name || 'payload').replace(/\.[^/.]+$/, '') + extension);
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -200,7 +254,7 @@ export default function VideoConverter() {
           setEncodedData({
             isBinary: true,
             compressionMode: modeUsed,
-            filename: file.name,
+            filename: sourceLabel,
             size: blob.size,
             encrypted: Boolean(password),
           });
@@ -210,7 +264,7 @@ export default function VideoConverter() {
           setEncodedData({
             isBinary: false,
             compressionMode: modeUsed,
-            filename: file.name,
+            filename: sourceLabel,
             size: text.length,
             encrypted: false,
           });
@@ -299,7 +353,7 @@ export default function VideoConverter() {
              {(['encode', 'decode'] as const).map(m => (
                <button
                  key={m}
-                 onClick={() => { setMode(m); setFile(null); setEncodedData(null); }}
+                 onClick={() => { setMode(m); setInputMode('single'); setFile(null); setBatchFiles([]); setEncodedData(null); }}
                  className={cn(
                    "flex-1 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
                    mode === m ? "bg-foreground text-background shadow-xl" : "text-foreground/70 hover:text-foreground"
@@ -309,6 +363,31 @@ export default function VideoConverter() {
                </button>
              ))}
           </div>
+          {mode === 'encode' && (
+            <div className="flex p-1 bg-background/40 rounded-xl border border-foreground/10 mt-3">
+              {([
+                { id: 'single', label: 'Single File' },
+                { id: 'batch', label: 'Folder / Multiple' },
+              ] as const).map(o => (
+                <button
+                  key={o.id}
+                  onClick={() => {
+                    setInputMode(o.id);
+                    setFile(null);
+                    setBatchFiles([]);
+                    setEncodedData(null);
+                    if (o.id === 'batch' && compressionMode === 'lossy') setCompressionMode('zstd-json');
+                  }}
+                  className={cn(
+                    "flex-1 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all",
+                    inputMode === o.id ? "bg-foreground text-background shadow-xl" : "text-foreground/70 hover:text-foreground"
+                  )}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-8 space-y-10 scrollbar-hide">
@@ -322,15 +401,19 @@ export default function VideoConverter() {
                   { id: 'zstd-json', label: 'ZSTD+JSON', desc: 'Zstd-22 · Human-Readable' },
                   { id: 'binary', label: 'BINARY STREAM', desc: 'Zstd-11 · Fastest' },
                   { id: 'context', label: 'MAX COMPRESSION', desc: 'Zstd-22 · Raw Binary' },
-                  { id: 'lossy', label: 'H.265 LOSSY', desc: 'Real Re-encode' }
-                ].map(c => (
+                  { id: 'lossy', label: 'H.265 LOSSY', desc: inputMode === 'batch' ? 'Video-only, unavailable for folders' : 'Real Re-encode' }
+                ].map(c => {
+                  const disabled = inputMode === 'batch' && c.id === 'lossy';
+                  return (
                     <button
                       key={c.id}
-                      onClick={() => setCompressionMode(c.id as 'zstd-json' | 'binary' | 'context' | 'lossy')}
+                      disabled={disabled}
+                      onClick={() => !disabled && setCompressionMode(c.id as 'zstd-json' | 'binary' | 'context' | 'lossy')}
                       className={cn(
                         "w-full flex items-center justify-between p-4 rounded-2xl border transition-all text-left",
-                        compressionMode === c.id 
-                          ? "bg-foreground/[0.05] border-accent-primary/50 text-foreground" 
+                        disabled && "opacity-30 cursor-not-allowed",
+                        compressionMode === c.id
+                          ? "bg-foreground/[0.05] border-accent-primary/50 text-foreground"
                           : "bg-transparent border-foreground/10 text-foreground/70 hover:border-foreground/20 hover:bg-foreground/[0.02]"
                       )}
                     >
@@ -340,7 +423,8 @@ export default function VideoConverter() {
                     </div>
                     {compressionMode === c.id && <div className="w-1.5 h-1.5 rounded-full bg-accent-primary glow-primary shadow-glow" />}
                   </button>
-                ))}
+                  );
+                })}
               </div>
               
               {compressionMode === 'lossy' && (
@@ -392,7 +476,7 @@ export default function VideoConverter() {
           </div>
 
           {/* Place Mobile Execute Action at the very end of the scroll */}
-          {file && !isProcessing && (
+          {hasPayload && !isProcessing && (
             <div className="block lg:hidden mt-8 pt-8 border-t border-foreground/10">
                {ExecuteAction}
             </div>
@@ -427,7 +511,7 @@ export default function VideoConverter() {
 
         <div className="flex-1 overflow-y-auto p-4 md:p-8 lg:p-12 scrollbar-hide py-12 md:py-8">
           <AnimatePresence mode="wait">
-            {!file ? (
+            {!hasPayload ? (
               <motion.div
                 key="empty"
                 initial={{ opacity: 0, scale: 0.98 }}
@@ -435,24 +519,53 @@ export default function VideoConverter() {
                 exit={{ opacity: 0, scale: 1.02 }}
                 className="h-full min-h-[400px] flex flex-col items-center justify-center"
               >
-                <div 
+                <div
                   onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
                   onDragLeave={() => setIsDragging(false)}
-                  onDrop={e => { e.preventDefault(); setIsDragging(false); if(e.dataTransfer.files[0]) validateAndSetFile(e.dataTransfer.files[0]); }}
-                  onClick={() => fileInputRef.current?.click()}
+                  onDrop={e => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                    if (inputMode === 'batch') {
+                      if (e.dataTransfer.files.length) setBatchSelection(e.dataTransfer.files);
+                    } else if (e.dataTransfer.files[0]) {
+                      validateAndSetFile(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  onClick={() => { if (inputMode === 'single') fileInputRef.current?.click(); }}
                   className={cn(
-                    "w-full max-w-3xl aspect-video rounded-[40px] md:rounded-[64px] border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all duration-700 relative group overflow-hidden bg-surface/20",
+                    "w-full max-w-3xl aspect-video rounded-[40px] md:rounded-[64px] border-2 border-dashed flex flex-col items-center justify-center transition-all duration-700 relative group overflow-hidden bg-surface/20",
+                    inputMode === 'single' && "cursor-pointer",
                     isDragging ? "border-accent-primary bg-accent-primary/5 scale-[1.01]" : "border-foreground/10 hover:border-foreground/20"
                   )}
                 >
                   <input ref={fileInputRef} type="file" accept={mode === 'encode' ? 'video/*' : undefined} className="hidden" onChange={e => { if(e.target.files?.[0]) validateAndSetFile(e.target.files[0]); }} />
-                  
+                  <input ref={folderInputRef} type="file" {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} multiple className="hidden" onChange={e => { if (e.target.files?.length) setBatchSelection(e.target.files); }} />
+                  <input ref={multiFileInputRef} type="file" multiple className="hidden" onChange={e => { if (e.target.files?.length) setBatchSelection(e.target.files); }} />
+
                   <motion.div animate={isDragging ? { y: -10 } : { y: 0 }} className="text-center z-10 p-6">
                     <div className="w-20 h-20 md:w-32 md:h-32 rounded-[24px] md:rounded-[40px] bg-foreground/[0.02] border border-foreground/10 flex items-center justify-center mb-6 md:mb-10 mx-auto transition-all duration-500 group-hover:scale-105 group-hover:border-foreground/20">
                       {mode === 'encode' ? <FileVideo className="w-8 h-8 md:w-12 md:h-12 text-accent-primary" /> : <Code className="w-8 h-8 md:w-12 md:h-12 text-accent-secondary" />}
                     </div>
                     <h2 className="text-2xl md:text-4xl font-black tracking-tighter text-foreground mb-4 leading-none">Load Payload</h2>
-                    <p className="text-foreground/60 font-semibold text-xs md:text-sm tracking-tight">Source Video or VCEO Stream</p>
+                    <p className="text-foreground/60 font-semibold text-xs md:text-sm tracking-tight mb-8">
+                      {inputMode === 'batch' ? 'Folder or multiple files, sealed into one archive' : 'Source Video or VCEO Stream'}
+                    </p>
+                    {inputMode === 'batch' && (
+                      <div className="flex items-center gap-3 justify-center pointer-events-auto">
+                        <button
+                          onClick={e => { e.stopPropagation(); folderInputRef.current?.click(); }}
+                          className="px-5 py-3 rounded-xl bg-accent-primary/10 border border-accent-primary/30 text-accent-primary text-[10px] font-black uppercase tracking-widest hover:bg-accent-primary/20 transition-all"
+                        >
+                          Select Folder
+                        </button>
+                        <button
+                          onClick={e => { e.stopPropagation(); multiFileInputRef.current?.click(); }}
+                          className="px-5 py-3 rounded-xl bg-foreground/5 border border-foreground/10 text-foreground/70 text-[10px] font-black uppercase tracking-widest hover:bg-foreground/10 transition-all"
+                        >
+                          Select Files
+                        </button>
+                      </div>
+                    )}
                   </motion.div>
                 </div>
               </motion.div>
@@ -469,12 +582,23 @@ export default function VideoConverter() {
                       {mode === 'encode' ? <FileVideo className="w-7 h-7 md:w-10 md:h-10" /> : <Code className="w-7 h-7 md:w-10 md:h-10 text-accent-secondary" />}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h3 className="text-lg md:text-3xl font-black text-foreground tracking-tighter leading-tight md:leading-none truncate" title={file.name}>{file.name}</h3>
-                      <p className="text-[9px] md:text-[10px] font-black text-foreground/40 uppercase tracking-[0.2em] mt-2 md:mt-3 leading-none truncate">{(file.size / 1024 / 1024).toFixed(2)} MB • READY</p>
+                      {inputMode === 'batch' ? (
+                        <>
+                          <h3 className="text-lg md:text-3xl font-black text-foreground tracking-tighter leading-tight md:leading-none truncate">
+                            {batchFiles[0]?.relativePath.split('/')[0] || 'Archive'}
+                          </h3>
+                          <p className="text-[9px] md:text-[10px] font-black text-foreground/40 uppercase tracking-[0.2em] mt-2 md:mt-3 leading-none truncate">{batchFiles.length} files • {(batchTotalSize / 1024 / 1024).toFixed(2)} MB • READY</p>
+                        </>
+                      ) : (
+                        <>
+                          <h3 className="text-lg md:text-3xl font-black text-foreground tracking-tighter leading-tight md:leading-none truncate" title={file?.name}>{file?.name}</h3>
+                          <p className="text-[9px] md:text-[10px] font-black text-foreground/40 uppercase tracking-[0.2em] mt-2 md:mt-3 leading-none truncate">{((file?.size || 0) / 1024 / 1024).toFixed(2)} MB • READY</p>
+                        </>
+                      )}
                     </div>
                   </div>
-                  <button 
-                    onClick={() => { setFile(null); setEncodedData(null); setError(''); setLogs([]); }}
+                  <button
+                    onClick={clearPayload}
                     className="shrink-0 w-full md:w-auto h-12 md:h-16 px-6 md:px-10 rounded-2xl md:rounded-[24px] text-[10px] font-black uppercase tracking-widest text-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-all border border-foreground/10 md:border-transparent bg-foreground/5 md:bg-transparent"
                   >
                     Detach Source

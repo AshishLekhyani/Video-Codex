@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
-import { writeFile, readFile, unlink, readdir, stat, open } from 'fs/promises';
+import { writeFile, readFile, rm, mkdir, readdir, stat, open } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { Readable } from 'stream';
 import { join } from 'path';
@@ -9,6 +9,7 @@ import { platform } from 'os';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import { setProgress, clearProgress } from './progressStore';
+import { packFiles, unpackFile, isPackFile, zipDirectory, PackEntry } from './pack';
 
 if (ffmpegStatic) {
   ffmpeg.setFfmpegPath(ffmpegStatic);
@@ -43,7 +44,7 @@ if (process.env.NODE_ENV !== 'test') {
         try {
           const fileStat = await stat(filePath);
           if (now - fileStat.mtimeMs > expiry) {
-            await unlink(filePath);
+            await rm(filePath, { recursive: true, force: true });
           }
         } catch {}
       }
@@ -127,13 +128,15 @@ export async function POST(request: NextRequest) {
   let outputPath = join(TEMP_DIR, `${id}_output`);
   let cleanupHandledByStream = false;
 
-  // Hardened cleanup: We seek all files prefixed with the session ID
+  // Hardened cleanup: We seek all files/dirs prefixed with the session ID
+  // (batch mode leaves behind per-entry temp files and an extracted-archive
+  // directory alongside the usual single-file temps, so this has to be recursive).
   const hardenedCleanup = async () => {
     try {
       const files = await readdir(TEMP_DIR);
       const sessionFiles = files.filter(f => f.startsWith(id));
       for (const f of sessionFiles) {
-        await unlink(join(TEMP_DIR, f)).catch(() => {});
+        await rm(join(TEMP_DIR, f), { recursive: true, force: true }).catch(() => {});
       }
     } catch {}
   };
@@ -152,12 +155,12 @@ export async function POST(request: NextRequest) {
 
   try {
     const formData = await request.formData();
-    const file = formData.get('file') as File;
     const mode = (formData.get('mode') as string) || 'encode';
     const compressionMode = (formData.get('compressionMode') as string) || 'zstd-json';
     const quality = (formData.get('quality') as string) || '85';
     const password = formData.get('password') as string;
     const clientJobId = formData.get('jobId') as string | null;
+    const batchMode = (formData.get('batchMode') as string) === 'true';
 
     if (clientJobId && JOB_ID_PATTERN.test(clientJobId)) {
       id = clientJobId;
@@ -165,35 +168,78 @@ export async function POST(request: NextRequest) {
       outputPath = join(TEMP_DIR, `${id}_output`);
     }
 
-    if (!file) {
-      return NextResponse.json({ error: 'No payload provided' }, { status: 400 });
+    if (batchMode && mode !== 'encode') {
+      return NextResponse.json({ error: 'Folder/batch conversion only supports encoding' }, { status: 400 });
     }
 
-    setProgress(id, { stage: 'Receiving upload', percent: 0, done: false });
-
-    const buffer = Buffer.from(await file.arrayBuffer());
     let currentInputPath = inputPath;
-    await writeFile(currentInputPath, buffer);
+    let displayName: string;
 
-    // Initial Decryption check
-    if (buffer.length >= 4 && buffer.slice(0, 4).toString('ascii') === 'VENC') {
-      if (!password) {
-        return NextResponse.json({ error: 'Payload is encrypted. Decryption key required.' }, { status: 400 });
+    if (batchMode) {
+      // Folder/multi-file mode: pack everything into one VPAK blob first, then
+      // fall straight into the exact same single-file pipeline below — it
+      // doesn't know or care whether the bytes it's compressing are one video
+      // or a packed archive.
+      const files = formData.getAll('files') as File[];
+      const paths = formData.getAll('paths') as string[];
+      if (files.length === 0) {
+        return NextResponse.json({ error: 'No files provided' }, { status: 400 });
       }
-      setProgress(id, { stage: 'Decrypting', percent: 0, done: false });
-      const decryptedPath = `${inputPath}_decrypted`;
-      await runCommand(RUST_BINARY, ['decrypt', currentInputPath, decryptedPath, password]);
-      currentInputPath = decryptedPath;
+      displayName = (formData.get('archiveName') as string) || 'archive';
+
+      setProgress(id, { stage: 'Receiving files', percent: 0, done: false });
+      const entries: PackEntry[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const entryPath = `${inputPath}_entry_${i}`;
+        await writeFile(entryPath, Buffer.from(await files[i].arrayBuffer()));
+        entries.push({ relativePath: paths[i] || files[i].name, sourcePath: entryPath });
+        setProgress(id, { stage: 'Receiving files', percent: Math.round(((i + 1) / files.length) * 100), done: false });
+      }
+
+      const packedPath = `${inputPath}_packed`;
+      setProgress(id, { stage: 'Packing files', percent: 0, done: false });
+      await packFiles(entries, packedPath, (pct) =>
+        setProgress(id, { stage: 'Packing files', percent: pct, done: false })
+      );
+      currentInputPath = packedPath;
+    } else {
+      const file = formData.get('file') as File;
+      if (!file) {
+        return NextResponse.json({ error: 'No payload provided' }, { status: 400 });
+      }
+      displayName = file.name;
+
+      setProgress(id, { stage: 'Receiving upload', percent: 0, done: false });
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      await writeFile(currentInputPath, buffer);
+
+      // Initial Decryption check
+      if (buffer.length >= 4 && buffer.slice(0, 4).toString('ascii') === 'VENC') {
+        if (!password) {
+          return NextResponse.json({ error: 'Payload is encrypted. Decryption key required.' }, { status: 400 });
+        }
+        setProgress(id, { stage: 'Decrypting', percent: 0, done: false });
+        const decryptedPath = `${inputPath}_decrypted`;
+        await runCommand(RUST_BINARY, ['decrypt', currentInputPath, decryptedPath, password]);
+        currentInputPath = decryptedPath;
+      }
     }
 
     if (mode === 'encode') {
+      const inputSize = (await stat(currentInputPath)).size;
+
+      if (batchMode && compressionMode === 'lossy') {
+        return NextResponse.json({ error: 'Lossy H.265 mode is video-specific and not available for folder/batch conversion' }, { status: 400 });
+      }
+
       // Already-compressed video barely shrinks under Zstd, so json+base64
       // inflation can push the output past the 2GiB fs streaming-response
       // ceiling even for inputs comfortably under it. Fall back to the
       // equivalent raw-binary container (same Zstd level, no json/base64).
       let effectiveCompressionMode = compressionMode;
       let fellBackFromJson = false;
-      if (effectiveCompressionMode === 'zstd-json' && buffer.length > LARGE_FILE_THRESHOLD) {
+      if (effectiveCompressionMode === 'zstd-json' && inputSize > LARGE_FILE_THRESHOLD) {
         effectiveCompressionMode = 'context';
         fellBackFromJson = true;
       }
@@ -217,7 +263,7 @@ export async function POST(request: NextRequest) {
         case 'binary': args = ['binary', targetInput, encodedOutputPath]; break;
         case 'context': args = ['context', targetInput, encodedOutputPath]; break;
         case 'lossy': args = ['lossy', targetInput, encodedOutputPath, quality]; break;
-        default: args = ['zstd-json', targetInput, encodedOutputPath, file.name]; break;
+        default: args = ['zstd-json', targetInput, encodedOutputPath, displayName]; break;
       }
 
       setProgress(id, { stage: 'Compressing', percent: 0, done: false });
@@ -226,7 +272,7 @@ export async function POST(request: NextRequest) {
       );
 
       let finalPath = encodedOutputPath;
-      let finalFilename = file.name.replace(/\.[^/.]+$/, '') + (isBinary ? '.vceo' : '.json');
+      let finalFilename = displayName.replace(/\.[^/.]+$/, '') + (isBinary ? '.vceo' : '.json');
 
       if (password) {
         setProgress(id, { stage: 'Encrypting', percent: 0, done: false });
@@ -278,6 +324,34 @@ export async function POST(request: NextRequest) {
       await runCommand(RUST_BINARY, [decodeType, currentInputPath, videoPath], (pct) =>
         setProgress(id, { stage: 'Decoding', percent: pct, done: false })
       );
+
+      // The decoded plaintext might be a packed folder/batch archive rather
+      // than a single video — peek its magic bytes to tell which.
+      const peekBuf = Buffer.alloc(4);
+      const peekHandle = await open(videoPath, 'r');
+      try {
+        await peekHandle.read(peekBuf, 0, 4, 0);
+      } finally {
+        await peekHandle.close();
+      }
+
+      if (isPackFile(peekBuf)) {
+        setProgress(id, { stage: 'Unpacking archive', percent: 0, done: false });
+        const extractDir = `${outputPath}_extracted`;
+        await mkdir(extractDir, { recursive: true });
+        await unpackFile(videoPath, extractDir);
+
+        setProgress(id, { stage: 'Zipping archive', percent: 0, done: false });
+        const zipPath = `${outputPath}.zip`;
+        await zipDirectory(extractDir, zipPath);
+
+        setProgress(id, { stage: 'Complete', percent: 100, done: true });
+        return streamFileAsResponse(zipPath, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="decoded_archive.zip"`,
+          'X-Job-Id': id,
+        });
+      }
 
       let filename = 'decoded_video.mp4';
       if (decodeType === 'decode-json') {

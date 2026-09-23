@@ -1,7 +1,6 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write, BufReader, BufWriter};
-use std::path::Path;
 use zstd::stream::{Encoder as ZstdEncoder, Decoder as ZstdDecoder};
 use serde::{Serialize, Deserialize};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
