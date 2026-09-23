@@ -260,7 +260,20 @@ export default function VideoConverter() {
           });
           setJsonText(`// ${isRawContainer ? 'BINARY VCEO STREAM' : 'ENCRYPTED JSON PAYLOAD'} DELIVERED\n// Mode: ${modeUsed.toUpperCase()}\n// Protection: ${password ? 'ChaCha20-Poly1305' : 'None'}`);
         } else {
-          const text = await (xhr.response as Blob).text();
+          const blob = xhr.response as Blob;
+          const text = await blob.text();
+
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = serverFilename || (inputMode === 'batch'
+            ? (batchFiles[0]?.relativePath.split('/')[0] || 'archive') + '.json'
+            : (file?.name || 'payload').replace(/\.[^/.]+$/, '') + '.json');
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+
           setEncodedData({
             isBinary: false,
             compressionMode: modeUsed,

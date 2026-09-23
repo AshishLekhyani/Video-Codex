@@ -302,6 +302,7 @@ export async function POST(request: NextRequest) {
         return streamFileAsResponse(finalPath, {
           ...sharedHeaders,
           'Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="${finalFilename}"`,
         });
       }
     } else {
